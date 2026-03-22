@@ -1,0 +1,14 @@
+Jupyter Kernel Gateway 3.0.1 is available at http://127.0.0.1:8888
+Kernel started: d452bd6d-67c7-4e76-a498-5f2be1be8078
+No session ID specified
+Adapting from protocol version 5.3 (kernel d452bd6d-67c7-4e76-a498-5f2be1be8078) to 5.4 (client).
+Connecting to kernel d452bd6d-67c7-4e76-a498-5f2be1be8078.
+WebSocket ping timeout after 108791 ms.
+Starting buffering for d452bd6d-67c7-4e76-a498-5f2be1be8078:0205ea0f-3388df30a8aba585f4be7629
+Interrupted...
+Jupyter Kernel Gateway 3.0.1 is available at http://127.0.0.1:8888
+Kernel started: 85608771-9077-423a-9bc1-8be16c082d5e
+No session ID specified
+Adapting from protocol version 5.3 (kernel 85608771-9077-423a-9bc1-8be16c082d5e) to 5.4 (client).
+Connecting to kernel 85608771-9077-423a-9bc1-8be16c082d5e.
+Interrupted...
