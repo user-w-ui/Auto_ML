@@ -1,12 +1,14 @@
 # Automated Machine Learning Workflow
 
-In this project, we build a machine learning workflow using AG2. The workflow involves data analysis, preprocessing, and model training to build a machine learning model.
+A personal project implementing an intelligent, automated machine learning workflow powered by AG2. This system orchestrates multiple AI agents to automatically analyze datasets, preprocess data, and train machine learning models end-to-end.
 
-Machine learning workflows typically involve several key steps:
+## Key Capabilities
 
-1. **Data Analysis and Exploration**: Understanding dataset size, columns, and distributions.
-2. **Data Preprocessing**: Cleaning data, handling missing values, and encoding categorical variables.
-3. **Model Training**: Training a model, comparing different models, and tuning hyperparameters.
+The workflow automates the entire ML pipeline:
+
+1. **Data Analysis & Exploration**: Automatically explore dataset characteristics, distributions, and patterns.
+2. **Data Preprocessing**: Remove duplicates, handle missing values, encode categorical features, and scale numerical data.
+3. **Model Training**: Train and compare multiple algorithms to find the best-performing model.
 
 ## Details
 
@@ -52,54 +54,79 @@ TAGS: data analysis, groupchat, stateflow, code execution, kaggle, automated mac
 ## Prerequisites
 
 - Python 3.12 or higher
-- OpenAI API key
+- DeepSeek API key (or compatible OpenAI-format LLM API)
+- Docker (optional, for isolated code execution)
 
 ## Installation
 
-1. Clone and navigate to the folder:
+1. Clone this repository:
 
 ```bash
-git clone https://github.com/ag2ai/build-with-ag2.git
-cd build-with-ag2/automate-ml-for-kaggle
+git clone https://github.com/user-w-ui/Auto_ML.git
+cd Auto_ML
 ```
 
 2. Install dependencies:
 
 ```bash
-uv sync
+pip install -e .
 ```
 
-3. Set up environment variables:
+3. Create and configure `.env` file:
 
 ```bash
 cp .env.example .env
-# Edit .env with your OpenAI API key
+# Edit .env with your DeepSeek API key
+DEEPSEEK_API_KEY=your_api_key_here
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_MODEL=deepseek-chat
 ```
+
+   Or set environment variables directly:
+   ```powershell
+   $env:DEEPSEEK_API_KEY="your_api_key"
+   ```
 
 
 ## Usage
 
+### Basic Example
+
 Run the automated ML workflow:
 
 ```bash
-uv run python main.py
+python main.py
 ```
 
-The workflow will:
+The workflow will automatically:
 1. Analyze the dataset (`house_prices_train.csv`)
-2. Preprocess the data automatically
-3. Train and compare multiple models
-4. Generate performance visualizations
-5. Output a comprehensive summary
+2. Preprocess and clean the data
+3. Train multiple models and compare performance
+4. Generate visualization charts
+5. Output code and summary
 
-## Contact
+### Docker Isolated Execution
 
-For more information or any questions, please refer to the documentation or reach out to us!
+For isolated code execution in a Docker container:
 
-- View Documentation at: https://docs.ag2.ai/latest/
-- Find AG2 on github: https://github.com/ag2ai/ag2
-- Join us on Discord: https://discord.gg/pAbnFJrkgZ
-- Email us at: support@ag2.ai
+```powershell
+$env:CODE_EXECUTOR_BACKEND="docker-jupyter"
+python main.py
+```
+
+Or specify a custom image:
+
+```powershell
+$env:CODE_EXECUTOR_BACKEND="docker-jupyter"
+$env:DOCKER_JUPYTER_IMAGE="your-custom-image"
+python main.py
+```
+
+## References
+
+- **AG2 Framework**: This project uses [AG2](https://github.com/ag2ai/ag2) for multi-agent orchestration - [AG2 Documentation](https://docs.ag2.ai/latest/)
+- **Dataset**: House Prices dataset from Kaggle
+- **Technologies**: Python, Jupyter, AG2, Scikit-learn, XGBoost, LightGBM, CatBoost
 
 ## License
 
