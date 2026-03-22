@@ -14,4 +14,7 @@ dependencies = [
     lightgbm
     catboost
     python-dotenv
+    typer
+    pydantic
+    PyYAML
 ]

@@ -1,0 +1,24 @@
+job:
+  name: "house-prices-demo"
+  output_dir: "runs"   # 可选；目前我们固定 runs/，后面可配置
+
+data:
+  path: "./house_prices_train.csv"
+  target: "SalePrice"
+  task_type: "regression"
+
+llm:
+  provider: "deepseek_openai_compatible"
+  model: "deepseek-chat"
+  base_url: "https://api.deepseek.com"
+  api_key_env: "DEEPSEEK_API_KEY"
+  timeout_sec: 120
+  temperature: 1.0
+
+execution:
+  code_executor_backend: "docker-jupyter"   # or "local-jupyter"
+  docker_jupyter_image: ""                 # optional
+
+workflow:
+  max_rounds: 20
+  train_trials: 2
