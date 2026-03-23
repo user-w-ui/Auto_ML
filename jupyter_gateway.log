@@ -12,3 +12,9 @@ No session ID specified
 Adapting from protocol version 5.3 (kernel 85608771-9077-423a-9bc1-8be16c082d5e) to 5.4 (client).
 Connecting to kernel 85608771-9077-423a-9bc1-8be16c082d5e.
 Interrupted...
+Jupyter Kernel Gateway 3.0.1 is available at http://127.0.0.1:8888
+Kernel started: bb9f82cb-0232-4aa1-b50f-643cbdbb8f35
+No session ID specified
+Adapting from protocol version 5.3 (kernel bb9f82cb-0232-4aa1-b50f-643cbdbb8f35) to 5.4 (client).
+Connecting to kernel bb9f82cb-0232-4aa1-b50f-643cbdbb8f35.
+Interrupted...

@@ -32,3 +32,4 @@ jupyter_gateway.log
 house_prices_processed.csv
 runs/
 __pycache__/
+history results/
