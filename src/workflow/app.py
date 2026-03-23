@@ -123,6 +123,29 @@ def _extract_python_code_blocks(content: str) -> str:
     return "\n\n".join(b.strip() for b in blocks if b.strip())
 
 
+def _sanitize_python_code(code: str) -> str:
+    lines = []
+    for ln in (code or "").splitlines():
+        s = ln.strip()
+        # Avoid recursive/self execution patterns that break in notebook sandbox.
+        if re.search(r"^exec\s*\(\s*open\s*\(.*\)\s*\.read\s*\(\s*\)\s*\)\s*$", s):
+            continue
+        if re.search(r"^%run\s+", s):
+            continue
+        lines.append(ln)
+    return "\n".join(lines).strip()
+
+
+def _state_script_name(step_name: str) -> str:
+    mapping = {
+        "Explore": "exploration.py",
+        "Preprocess": "preprocess.py",
+        "Train": "train.py",
+        "Summarize": "summary.py",
+    }
+    return mapping.get(step_name, f"{step_name.lower()}.py")
+
+
 def _organize_generated_files(run_dir: Path, plot_dir: Path, data_dir: Path) -> None:
     image_exts = {".png", ".jpg", ".jpeg", ".svg", ".webp", ".gif", ".pdf"}
     data_exts = {".csv", ".parquet", ".json", ".xlsx", ".pkl", ".joblib"}
@@ -344,11 +367,18 @@ Environment:
         nonlocal exec_seq
         exec_seq += 1
         content = prev_chat.chat_history[-1]["content"]
-        code_text = _extract_python_code_blocks(content)
+        code_text = _sanitize_python_code(_extract_python_code_blocks(content))
         if code_text:
             code_path = coding_dir / f"{exec_seq:03d}_{step_name}.py"
             code_path.write_text(code_text + "\n", encoding="utf-8")
-        exec_chat = initializer.initiate_chat(code_executor, message=content, max_turns=1)
+            state_code_path = coding_dir / _state_script_name(step_name)
+            state_code_path.write_text(code_text + "\n", encoding="utf-8")
+
+        exec_message = content
+        if code_text:
+            exec_message = f"```python\n{code_text}\n```"
+
+        exec_chat = initializer.initiate_chat(code_executor, message=exec_message, max_turns=1)
         out = _extract_last_executor_output(exec_chat)
         _organize_generated_files(run_dir=run_dir, plot_dir=plot_dir, data_dir=data_dir)
         return out
