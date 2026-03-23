@@ -41,7 +41,7 @@ from src.jobs.status import (
     save_status,
     set_status_running,
 )
-from workflow.subprocess import spawn_workflow_process
+from src.workflow.subprocess import spawn_workflow_process
 
 # 注册 CLI 命令
 app = typer.Typer(add_completion=False, help="Auto_ML job runner (AG2 pipeline)")

@@ -6,10 +6,17 @@ from dotenv import load_dotenv
 from src.config.load import load_config
 from src.workflow.app import run_workflow
 
-load_dotenv(Path(__file__).with_name(".env"))
 
-if __name__ == "__main__":
-    # 兼容：没有 config 就跑默认
+def main() -> None:
+    load_dotenv(Path(__file__).with_name(".env"))
+
     cfg_path = Path("configs/example.yaml")
     cfg = load_config(cfg_path) if cfg_path.exists() else {}
-    run_workflow(cfg, run_dir=Path("runs") / "manual_run")
+
+    # manual run output (kept separate from async runs/)
+    run_dir = Path("runs") / "manual_run"
+    run_workflow(cfg, run_dir=run_dir)
+
+
+if __name__ == "__main__":
+    main()

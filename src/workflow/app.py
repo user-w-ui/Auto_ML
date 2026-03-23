@@ -1,10 +1,3 @@
-"""
-Minimal callable workflow.
-
-目标：
-- 只是把它包成函数，方便 CLI/runner 调用
-- 后续我们往这里塞 RAG 注入、memory 注入、工具调用
-"""
 from __future__ import annotations
 
 import os
@@ -16,11 +9,13 @@ import autogen
 from autogen import OpenAIWrapper
 from autogen.coding.jupyter import DockerJupyterServer, JupyterCodeExecutor, LocalJupyterServer
 
-from utils import is_ready_for_train, count_train_trials
+from utils import is_ready_for_train
+from src.rag.kb_index import MiniVectorIndex
+from src.rag.run_memory import RunMemory
+from src.workflow.checkpoint import load_or_init_checkpoint, save_checkpoint
 
 
 def _ensure_windows_scripts_on_path() -> None:
-    """你之前 main.py 的 Windows PATH 修复，保留。"""
     if os.name == "nt":
         scripts_dir = Path(sys.executable).parent / "Scripts"
         if scripts_dir.exists():
@@ -29,14 +24,11 @@ def _ensure_windows_scripts_on_path() -> None:
 
 
 def build_llm_config_from_env() -> Dict[str, Any]:
-    """保持你现在的 DeepSeek OpenAI-compatible 配置方式。"""
     deepseek_api_key = os.environ.get("DEEPSEEK_API_KEY")
     deepseek_base_url = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
     deepseek_model = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
-
     if not deepseek_api_key:
         raise RuntimeError("Missing DEEPSEEK_API_KEY. Please set it in .env or environment variables.")
-
     return {
         "api_type": "openai",
         "model": deepseek_model,
@@ -45,41 +37,104 @@ def build_llm_config_from_env() -> Dict[str, Any]:
     }
 
 
-def run_workflow(config: Dict[str, Any], run_dir: Optional[Path] = None) -> Dict[str, Any]:
-    """
-    Run the multi-agent AutoML workflow.
+def _build_rag_injector(config: Dict[str, Any], run_dir: Path):
+    kb_dir = Path(config.get("rag", {}).get("kb_dir", "kb"))
+    if not kb_dir.exists():
+        def _empty(_q: str) -> str:
+            return ""
+        return _empty
 
-    Returns a small dict summary for the runner to record.
+    rag_cfg = config.get("rag", {})
+    ollama_base_url = str(rag_cfg.get("ollama_base_url", "http://localhost:11434"))
+    ollama_model = str(rag_cfg.get("ollama_model", "nomic-embed-text"))
+    top_k = int(rag_cfg.get("top_k", 4))
+
+    cache_path = run_dir / "kb_index.json"
+    index = MiniVectorIndex.build_or_load(
+        kb_dir=kb_dir,
+        cache_path=cache_path,
+        ollama_base_url=ollama_base_url,
+        ollama_model=ollama_model,
+    )
+
+    def rag_context(query: str) -> str:
+        results = index.search(query=query, top_k=top_k, ollama_base_url=ollama_base_url, ollama_model=ollama_model)
+        blocks = []
+        for score, chunk in results:
+            blocks.append(f"[{chunk.doc_id}#{chunk.chunk_id} score={score:.3f}]\n{chunk.text}")
+        return "Relevant Knowledge (RAG):\n" + "\n\n".join(blocks) + "\n"
+
+    return rag_context
+
+
+def _extract_last_executor_output(chat_result) -> str:
+    """
+    Find the last message from Code_Executor and return its content.
+    """
+    if not chat_result:
+        return ""
+    for msg in reversed(chat_result.chat_history):
+        if msg.get("name") == "Code_Executor":
+            return msg.get("content") or ""
+    return ""
+
+
+def run_workflow(config: Dict[str, Any], run_dir: Optional[Path] = None, resume: bool = True) -> Dict[str, Any]:
+    """
+    Minimal end-to-end workflow with REAL checkpoint/resume.
+
+    Key skills learned here:
+    - state machine (explicit states)
+    - recoverable (checkpoint + resume)
+    - RAG knowledge injection (embedding)
+    - run memory (append-only JSONL)
     """
     _ensure_windows_scripts_on_path()
-
-    # prevent kernel gateway websocket ping timeout during long-running code blocks.
     os.environ.setdefault("KG_WS_PING_INTERVAL_SECS", "0")
 
-    run_dir = run_dir or Path(".")
+    run_dir = Path(run_dir or ".").resolve()
     artifacts_dir = run_dir / "artifacts"
     artifacts_dir.mkdir(parents=True, exist_ok=True)
 
-    # Read task/data from config.yaml
-    data_path = config.get("data", {}).get("path", "./house_prices_train.csv")
-    target = config.get("data", {}).get("target", "SalePrice")
-    task_type = config.get("data", {}).get("task_type", "regression")
+    mem = RunMemory(artifacts_dir / "run_memory.jsonl")
 
-    train_trials = int(config.get("workflow", {}).get("train_trials", 2))
-    max_rounds = int(config.get("workflow", {}).get("max_rounds", 20))
+    # Load/Init checkpoint
+    run_id = run_dir.name  # cheap run_id inference
+    ckpt = load_or_init_checkpoint(run_id=run_id, run_dir=run_dir)
+
+    # Config
+    data_cfg = config.get("data", {}) if isinstance(config.get("data", {}), dict) else {}
+    workflow_cfg = config.get("workflow", {}) if isinstance(config.get("workflow", {}), dict) else {}
+    exec_cfg = config.get("execution", {}) if isinstance(config.get("execution", {}), dict) else {}
+
+    data_path = str(data_cfg.get("path", "./house_prices_train.csv"))
+    target = str(data_cfg.get("target", "SalePrice"))
+    task_type = str(data_cfg.get("task_type", "regression"))
+
+    train_trials = int(workflow_cfg.get("train_trials", 2))
+    max_rounds = int(workflow_cfg.get("max_rounds", 20))  # not heavily used now, kept for future
+
+    executor_backend = str(exec_cfg.get("code_executor_backend", os.environ.get("CODE_EXECUTOR_BACKEND", "local-jupyter"))).strip().lower()
+    docker_image = exec_cfg.get("docker_jupyter_image") or os.environ.get("DOCKER_JUPYTER_IMAGE") or None
 
     llm_config = build_llm_config_from_env()
-    config_list = [llm_config]
+    client = OpenAIWrapper(config_list=[llm_config])
 
+    rag_context = _build_rag_injector(config, run_dir)
+
+    # Agents
     initializer = autogen.UserProxyAgent(name="Init", code_execution_config=False)
 
     data_explorer = autogen.AssistantAgent(
         name="Data_Explorer",
         llm_config=llm_config,
         system_message=(
-            "You are the data explorer. Given a dataset and a task, write code to explore the dataset.\n"
-            "Focus on: shape, head, df.info/describe, missing values, target distribution, and necessary plots.\n"
-            'If you think the data is ready and no more exploration is needed, reply with "Ready for training".'
+            rag_context("tabular dataset exploration checklist, missing values, target distribution, plots")
+            + """
+You are the data explorer. Write code to explore dataset characteristics (shape, head, info/describe, missing values, target distribution, basic plots).
+Do NOT train models.
+If you think the data is ready and no more exploration is needed, reply exactly: Ready for training
+""".strip()
         ),
     )
 
@@ -87,9 +142,12 @@ def run_workflow(config: Dict[str, Any], run_dir: Optional[Path] = None) -> Dict
         name="Data_Processer",
         llm_config=llm_config,
         system_message=(
-            "You are the data processer. Clean/prepare data for model training.\n"
-            "Handle missing values, encode categorical features, scale numerical features when needed.\n"
-            "Avoid inplace=True; assign to new variables.\n"
+            rag_context("tabular preprocessing checklist: missing values, categorical encoding, leakage prevention, pipeline")
+            + """
+You are the data processer. Clean/prepare the dataset for model training.
+Handle missing values, encode categorical variables, scale when helpful.
+Avoid inplace=True.
+""".strip()
         ),
     )
 
@@ -97,9 +155,12 @@ def run_workflow(config: Dict[str, Any], run_dir: Optional[Path] = None) -> Dict
         name="Model_Trainer",
         llm_config=llm_config,
         system_message=(
-            "You are the model trainer. Train one model per iteration, evaluate on a 70/30 train/test split.\n"
-            "Try different models or hyperparameters across iterations (no grid search).\n"
-            "Save performance visualizations as images.\n"
+            rag_context("tabular regression modeling, baselines, boosting models, metrics, residual plots")
+            + """
+You are the model trainer. Train ONE model per iteration.
+Use 70/30 train/test split. Evaluate and save plots as images.
+Try a different model or different hyperparameters each iteration. No grid search.
+""".strip()
         ),
     )
 
@@ -107,105 +168,163 @@ def run_workflow(config: Dict[str, Any], run_dir: Optional[Path] = None) -> Dict
         name="Code_Summarizer",
         llm_config=llm_config,
         system_message=(
-            "You are the code summarizer. Integrate all error-free code into a single runnable snippet.\n"
-            "Provide a brief summary of exploration, preprocessing, and training steps.\n"
-            "Conclude what model is best for the task.\n"
+            rag_context("write a concise ML report with metrics table and plot references")
+            + """
+You are the code summarizer. Integrate all error-free code into a single runnable snippet.
+Summarize exploration, preprocessing, training, and conclude best model.
+""".strip()
         ),
     )
 
-    # Code execution backend (local or docker jupyter)
-    executor_backend = str(config.get("execution", {}).get("code_executor_backend", "local-jupyter")).strip().lower()
-    output_dir = artifacts_dir / "coding"
-    output_dir.mkdir(exist_ok=True)
+    # Code executor
+    coding_dir = artifacts_dir / "coding"
+    coding_dir.mkdir(exist_ok=True)
 
     if executor_backend == "docker-jupyter":
-        docker_image = config.get("execution", {}).get("docker_jupyter_image") or None
         server = DockerJupyterServer(custom_image_name=docker_image)
     else:
         server = LocalJupyterServer()
 
     code_executor = autogen.UserProxyAgent(
         name="Code_Executor",
-        system_message="Executor. Execute code and report result.",
+        system_message="Executor. Execute the code written by the Coder and report the result.",
         human_input_mode="NEVER",
-        code_execution_config={"executor": JupyterCodeExecutor(server, output_dir=output_dir)},
+        code_execution_config={"executor": JupyterCodeExecutor(server, output_dir=coding_dir)},
     )
 
-    client = OpenAIWrapper(config_list=config_list)
-
-    def state_transition(last_speaker, groupchat):
-        messages = groupchat.messages
-
-        if last_speaker is initializer:
-            return data_explorer
-
-        elif last_speaker in [data_explorer, data_processer, model_trainer]:
-            return code_executor
-
-        elif last_speaker is code_executor:
-            last_second_speaker_name = groupchat.messages[-2]["name"]
-
-            if "exitcode: 1" in messages[-1]["content"]:
-                return groupchat.agent_by_name(last_second_speaker_name)
-
-            elif last_second_speaker_name == "Data_Explorer":
-                return data_processer
-
-            elif last_second_speaker_name == "Data_Processer":
-                if is_ready_for_train(groupchat=groupchat, client=client):
-                    return model_trainer
-                return data_explorer
-
-            elif last_second_speaker_name == "Model_Trainer":
-                if count_train_trials(groupchat) < train_trials:
-                    return model_trainer
-                return summarizer
-
-        elif last_speaker is summarizer:
-            return None
-
-    groupchat = autogen.GroupChat(
-        agents=[initializer, data_explorer, data_processer, model_trainer, summarizer, code_executor],
-        messages=[],
-        max_round=max_rounds,
-        speaker_selection_method=state_transition,
-    )
-    manager = autogen.GroupChatManager(groupchat=groupchat, llm_config=None)
-
-    task_prompt = f"""Please help me build a model to predict '{target}'.
+    task_header = f"""Task:
+- Predict target: `{target}`
 - Task type: {task_type}
-- The dataset is located at: `{data_path}`.
-- All code will be executed in a Jupyter notebook, where previous states are saved.
-- Save any plots to the current working directory (it will be persisted).
+- Dataset path: `{data_path}`
+Environment:
+- Code executes in Jupyter; previous states are saved.
+- Save plots as image files.
 """
 
-    chat_result = None
+    def run_step(agent, step_name: str, prompt: str):
+        ckpt.current_state = step_name  # type: ignore
+        ckpt.bump_attempt(step_name)    # type: ignore
+        save_checkpoint(run_dir, ckpt)
+
+        mem.append({"type": "state_enter", "state": step_name})
+
+        chat = initializer.initiate_chat(
+            agent,
+            message=prompt,
+            max_turns=1,  # single agent response; code is executed in next step explicitly
+        )
+        return chat
+
+    def execute_code(prev_chat) -> str:
+        # Execute code by sending previous agent content to Code_Executor
+        content = prev_chat.chat_history[-1]["content"]
+        exec_chat = initializer.initiate_chat(code_executor, message=content, max_turns=1)
+        out = _extract_last_executor_output(exec_chat)
+        return out
+
     try:
-        chat_result = initializer.initiate_chat(manager, message=task_prompt)
+        # Resume logic: decide where to start
+        start_state = ckpt.current_state if resume else "Init"
+
+        # --- Explore ---
+        if start_state in ["Init", "Explore"]:
+            explore_prompt = task_header + "\nPlease explore the dataset first."
+            chat1 = run_step(data_explorer, "Explore", explore_prompt)
+            out = execute_code(chat1)
+            ok = ("exitcode: 1" not in out)
+            mem.append({"type": "state_exit", "state": "Explore", "ok": ok})
+            if not ok:
+                raise RuntimeError("Explore code execution failed (see executor output).")
+
+            ckpt.current_state = "Preprocess"
+            save_checkpoint(run_dir, ckpt)
+
+        # --- Preprocess (loop until LLM says ready) ---
+        if ckpt.current_state in ["Preprocess"]:
+            while True:
+                preprocess_prompt = task_header + "\nPlease preprocess/clean the dataset for training."
+                chat2 = run_step(data_processer, "Preprocess", preprocess_prompt)
+                out = execute_code(chat2)
+                ok = ("exitcode: 1" not in out)
+                mem.append({"type": "state_exit", "state": "Preprocess", "ok": ok})
+                if not ok:
+                    raise RuntimeError("Preprocess code execution failed (see executor output).")
+
+                # Ask decision model (same as your previous is_ready_for_train)
+                ready = is_ready_for_train(groupchat=type("X", (), {"messages": chat2.chat_history})(), client=client)  # minimal adapter
+                mem.append({"type": "decision", "state": "Preprocess", "ready_for_train": bool(ready)})
+
+                if ready:
+                    ckpt.current_state = "Train"
+                    save_checkpoint(run_dir, ckpt)
+                    break
+                else:
+                    # go back to Explore once, to avoid infinite preprocess loop
+                    ckpt.current_state = "Explore"
+                    save_checkpoint(run_dir, ckpt)
+                    # Explore once then come back
+                    explore_prompt = task_header + "\nDo any additional exploration needed based on preprocessing results."
+                    chatx = run_step(data_explorer, "Explore", explore_prompt)
+                    outx = execute_code(chatx)
+                    okx = ("exitcode: 1" not in outx)
+                    mem.append({"type": "state_exit", "state": "Explore", "ok": okx})
+                    if not okx:
+                        raise RuntimeError("Explore (after preprocess) failed.")
+                    ckpt.current_state = "Preprocess"
+                    save_checkpoint(run_dir, ckpt)
+
+        # --- Train (fixed number of trials) ---
+        if ckpt.current_state in ["Train"]:
+            while ckpt.train_trials_done < train_trials:
+                trial_no = ckpt.train_trials_done + 1
+                train_prompt = task_header + f"\nTrain iteration {trial_no}/{train_trials}: train a model and evaluate. Save plots."
+                chat3 = run_step(model_trainer, "Train", train_prompt)
+                out = execute_code(chat3)
+                ok = ("exitcode: 1" not in out)
+                mem.append({"type": "train_trial", "trial": trial_no, "ok": ok})
+                if not ok:
+                    # don't count failed trial
+                    raise RuntimeError(f"Train trial {trial_no} failed (see executor output).")
+
+                ckpt.train_trials_done += 1
+                save_checkpoint(run_dir, ckpt)
+
+            ckpt.current_state = "Summarize"
+            save_checkpoint(run_dir, ckpt)
+
+        # --- Summarize ---
+        if ckpt.current_state in ["Summarize"]:
+            summary_prompt = task_header + "\nSummarize the workflow and provide final integrated python code."
+            chat4 = initializer.initiate_chat(summarizer, message=summary_prompt, max_turns=1)
+
+            # Save integrated code if present
+            saved_train_file = None
+            content = chat4.chat_history[-1]["content"]
+            if "```python" in content:
+                code = content.split("```python")[1].split("```")[0].strip()
+                saved_train_file = artifacts_dir / "train_file_by_agent.py"
+                saved_train_file.write_text(code, encoding="utf-8")
+
+            (artifacts_dir / "chat_history.json").write_text(
+                __import__("json").dumps(chat4.chat_history, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            mem.append({"type": "state_exit", "state": "Summarize", "ok": True, "saved_train_file": str(saved_train_file) if saved_train_file else None})
+
+            ckpt.current_state = "End"
+            save_checkpoint(run_dir, ckpt)
+
+        return {
+            "data_path": data_path,
+            "target": target,
+            "task_type": task_type,
+            "executor_backend": executor_backend,
+            "run_memory": str(mem.path),
+            "checkpoint": str((run_dir / "state.json")),
+        }
+
     finally:
-        # Always stop server to avoid orphan kernel gateway processes/containers.
         try:
             server.stop()
         except Exception:
-            jupyter_proc = getattr(server, "_subprocess", None)
-            if jupyter_proc is not None and jupyter_proc.poll() is None:
-                jupyter_proc.terminate()
-                try:
-                    jupyter_proc.wait(timeout=10)
-                except Exception:
-                    jupyter_proc.kill()
-
-    # Save final integrated code if present
-    saved_train_file = None
-    if chat_result and "```python" in chat_result.chat_history[-1]["content"]:
-        content = chat_result.chat_history[-1]["content"]
-        content = content.split("```python")[1].split("```")[0].strip()
-        saved_train_file = artifacts_dir / "train_file_by_agent.py"
-        saved_train_file.write_text(content, encoding="utf-8")
-
-    return {
-        "saved_train_file": str(saved_train_file) if saved_train_file else None,
-        "data_path": data_path,
-        "target": target,
-        "executor_backend": executor_backend,
-    }
+            pass
