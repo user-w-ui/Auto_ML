@@ -26,6 +26,8 @@ Quick start:
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -60,6 +62,7 @@ def make_run_id() -> str:
 def run(
     config: Path = typer.Option(..., "--config", "-c", exists=True, readable=True),
     run_id: Optional[str] = typer.Option(None, "--run-id", help="Optional: provide your own run_id"),
+    foreground: bool = typer.Option(False, "--foreground", help="Run workflow in foreground and stream logs."),
 ):
     """
     Create a new run folder, snapshot config, set status=running.
@@ -85,17 +88,39 @@ def run(
         encoding="utf-8",
     )
     
-    # spawn background workflow process
-    proc = spawn_workflow_process(rid, config)
+    if foreground:
+        # 5) 前台运行：容器/终端内可直接看到实时输出
+        set_status_running(layout, pid=None)
+        typer.echo(f"Submitted run: {rid}")
+        typer.echo("Mode: foreground")
+        typer.echo(f"Run dir: {layout.run_dir.resolve()}")
 
-    # 5) 设置 status=running（可观测性）
-    set_status_running(layout, pid=proc.pid)
+        cmd = [
+            sys.executable,
+            "-u",
+            "-m",
+            "src.workflow.runner",
+            "--run-id",
+            rid,
+            "--config",
+            str(config),
+        ]
+        rc = subprocess.call(cmd)
+        s = load_status(layout)
+        typer.echo(f"Final status: {s.status}")
+        if s.error:
+            typer.echo(f"Error: {s.error}")
+        raise typer.Exit(code=rc)
+    else:
+        # 5) 异步运行：CLI 立即返回
+        proc = spawn_workflow_process(rid, config)
+        set_status_running(layout, pid=proc.pid)
 
-    typer.echo(f"Submitted run: {rid}")
-    typer.echo(f"PID: {proc.pid}")
-    typer.echo(f"Run dir: {layout.run_dir.resolve()}")
-    typer.echo("Tip: check progress via:")
-    typer.echo(f"  python cli.py status --run-id {rid}")
+        typer.echo(f"Submitted run: {rid}")
+        typer.echo(f"PID: {proc.pid}")
+        typer.echo(f"Run dir: {layout.run_dir.resolve()}")
+        typer.echo("Tip: check progress via:")
+        typer.echo(f"  python cli.py status --run-id {rid}")
 
 @app.command()
 def status(run_id: str = typer.Option(..., "--run-id", "-r")):

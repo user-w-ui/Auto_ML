@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional, List
@@ -110,6 +111,61 @@ def _summarize_executor_error(executor_output: str, max_chars: int = 900) -> str
     return s
 
 
+def _progress(message: str) -> None:
+    print(f"[workflow] {message}", flush=True)
+
+
+def _extract_python_code_blocks(content: str) -> str:
+    text = content or ""
+    blocks = re.findall(r"```python\s*(.*?)```", text, flags=re.IGNORECASE | re.DOTALL)
+    if not blocks:
+        return text.strip()
+    return "\n\n".join(b.strip() for b in blocks if b.strip())
+
+
+def _organize_generated_files(run_dir: Path, plot_dir: Path, data_dir: Path) -> None:
+    image_exts = {".png", ".jpg", ".jpeg", ".svg", ".webp", ".gif", ".pdf"}
+    data_exts = {".csv", ".parquet", ".json", ".xlsx", ".pkl", ".joblib"}
+    reserved_files = {
+        "state.json",
+        "status.json",
+        "run_config.json",
+        "run_memory.jsonl",
+    }
+    reserved_dirs = {"plot", "data", "coding", "logs"}
+
+    for p in run_dir.iterdir():
+        if p.is_dir() and p.name in reserved_dirs:
+            continue
+        if p.is_dir():
+            continue
+        if p.name in reserved_files:
+            continue
+
+        ext = p.suffix.lower()
+        dest = None
+        if ext in image_exts:
+            dest = plot_dir / p.name
+        elif ext in data_exts:
+            dest = data_dir / p.name
+
+        if dest is None:
+            continue
+
+        if dest.exists():
+            stem = p.stem
+            suffix = p.suffix
+            idx = 1
+            while True:
+                candidate = dest.with_name(f"{stem}_{idx}{suffix}")
+                if not candidate.exists():
+                    dest = candidate
+                    break
+                idx += 1
+
+        p.replace(dest)
+
+
 def run_workflow(config: Dict[str, Any], run_dir: Optional[Path] = None, resume: bool = True) -> Dict[str, Any]:
     """
     Minimal end-to-end workflow with checkpoint/resume + RAG + run memory.
@@ -123,10 +179,18 @@ def run_workflow(config: Dict[str, Any], run_dir: Optional[Path] = None, resume:
     os.environ.setdefault("KG_WS_PING_INTERVAL_SECS", "0")
 
     run_dir = Path(run_dir or ".").resolve()
-    artifacts_dir = run_dir / "artifacts"
-    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    _progress(f"run started | run_dir={run_dir} | resume={resume}")
+    run_dir.mkdir(parents=True, exist_ok=True)
+    plot_dir = run_dir / "plot"
+    data_dir = run_dir / "data"
+    coding_dir = run_dir / "coding"
+    logs_dir = run_dir / "logs"
+    plot_dir.mkdir(parents=True, exist_ok=True)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    coding_dir.mkdir(parents=True, exist_ok=True)
+    logs_dir.mkdir(parents=True, exist_ok=True)
 
-    mem = RunMemory(artifacts_dir / "run_memory.jsonl")
+    mem = RunMemory(run_dir / "run_memory.jsonl")
 
     # Load/Init checkpoint
     run_id = run_dir.name  # cheap run_id inference
@@ -235,9 +299,6 @@ Summarize exploration, preprocessing, training, and conclude best model.
     )
 
     # Code executor
-    coding_dir = artifacts_dir / "coding"
-    coding_dir.mkdir(exist_ok=True)
-
     if executor_backend == "docker-jupyter":
         server = DockerJupyterServer(custom_image_name=docker_image)
     else:
@@ -256,13 +317,17 @@ Summarize exploration, preprocessing, training, and conclude best model.
 - Dataset path: `{data_path}`
 Environment:
 - Code executes in Jupyter; previous states are saved.
-- Save plots as image files.
+- Save ALL plot/image files under: `{plot_dir}`
+- Save ALL data/model files (.csv/.json/.pkl/.joblib/.xlsx/.parquet) under: `{data_dir}`
+- Save generated scripts under: `{coding_dir}`
+- Do NOT save files under project root like `/app`.
 """
 
     def run_step(agent, step_name: str, prompt: str):
         ckpt.current_state = step_name  # type: ignore
         ckpt.bump_attempt(step_name)    # type: ignore
         save_checkpoint(run_dir, ckpt)
+        _progress(f"enter state={step_name}")
 
         mem.append({"type": "state_enter", "state": step_name})
 
@@ -273,25 +338,39 @@ Environment:
         )
         return chat
 
-    def execute_code(prev_chat) -> str:
+    exec_seq = 0
+
+    def execute_code(prev_chat, step_name: str) -> str:
+        nonlocal exec_seq
+        exec_seq += 1
         content = prev_chat.chat_history[-1]["content"]
+        code_text = _extract_python_code_blocks(content)
+        if code_text:
+            code_path = coding_dir / f"{exec_seq:03d}_{step_name}.py"
+            code_path.write_text(code_text + "\n", encoding="utf-8")
         exec_chat = initializer.initiate_chat(code_executor, message=content, max_turns=1)
         out = _extract_last_executor_output(exec_chat)
+        _organize_generated_files(run_dir=run_dir, plot_dir=plot_dir, data_dir=data_dir)
         return out
 
     try:
         # Resume logic: decide where to start
         start_state = ckpt.current_state if resume else "Init"
+        _progress(f"start_state={start_state} | backend={executor_backend}")
 
         # --- Explore ---
         if start_state in ["Init", "Explore"]:
             explore_prompt = task_header + "\nPlease explore the dataset first."
             chat1 = run_step(data_explorer, "Explore", explore_prompt)
-            out = execute_code(chat1)
+            out = execute_code(chat1, "Explore")
             ok = ("exitcode: 1" not in out)
-            mem.append({"type": "state_exit", "state": "Explore", "ok": ok})
+            error_snip = _summarize_executor_error(out) if not ok else None
+            mem.append({"type": "state_exit", "state": "Explore", "ok": ok, "error_snippet": error_snip})
             if not ok:
-                raise RuntimeError("Explore code execution failed (see executor output).")
+                _progress("state=Explore failed")
+                raise RuntimeError(f"Explore code execution failed. Executor error snippet:\n{error_snip}")
+
+            _progress("state=Explore done")
 
             ckpt.current_state = "Preprocess"
             save_checkpoint(run_dir, ckpt)
@@ -301,30 +380,38 @@ Environment:
             while True:
                 preprocess_prompt = task_header + "\nPlease preprocess/clean the dataset for training."
                 chat2 = run_step(data_processer, "Preprocess", preprocess_prompt)
-                out = execute_code(chat2)
+                out = execute_code(chat2, "Preprocess")
                 ok = ("exitcode: 1" not in out)
-                mem.append({"type": "state_exit", "state": "Preprocess", "ok": ok})
+                error_snip = _summarize_executor_error(out) if not ok else None
+                mem.append({"type": "state_exit", "state": "Preprocess", "ok": ok, "error_snippet": error_snip})
                 if not ok:
-                    raise RuntimeError("Preprocess code execution failed (see executor output).")
+                    _progress("state=Preprocess failed")
+                    raise RuntimeError(f"Preprocess code execution failed. Executor error snippet:\n{error_snip}")
 
                 ready = is_ready_for_train(messages=chat2.chat_history, client=client)
                 mem.append({"type": "decision", "state": "Preprocess", "ready_for_train": bool(ready)})
 
                 if ready:
+                    _progress("state=Preprocess done | ready_for_train=true")
                     ckpt.current_state = "Train"
                     save_checkpoint(run_dir, ckpt)
                     break
                 else:
+                    _progress("state=Preprocess done | ready_for_train=false -> back to Explore")
                     ckpt.current_state = "Explore"
                     save_checkpoint(run_dir, ckpt)
 
                     explore_prompt = task_header + "\nDo any additional exploration needed based on preprocessing results."
                     chatx = run_step(data_explorer, "Explore", explore_prompt)
-                    outx = execute_code(chatx)
+                    outx = execute_code(chatx, "Explore")
                     okx = ("exitcode: 1" not in outx)
-                    mem.append({"type": "state_exit", "state": "Explore", "ok": okx})
+                    error_snip_x = _summarize_executor_error(outx) if not okx else None
+                    mem.append({"type": "state_exit", "state": "Explore", "ok": okx, "error_snippet": error_snip_x})
                     if not okx:
-                        raise RuntimeError("Explore (after preprocess) failed.")
+                        _progress("state=Explore(after preprocess) failed")
+                        raise RuntimeError(f"Explore (after preprocess) failed. Executor error snippet:\n{error_snip_x}")
+
+                    _progress("state=Explore(after preprocess) done")
 
                     ckpt.current_state = "Preprocess"
                     save_checkpoint(run_dir, ckpt)
@@ -345,6 +432,7 @@ Environment:
                     raise RuntimeError(f"Too many train failures ({train_failure_count}). Aborting run.")
 
                 trial_no = ckpt.train_trials_done + 1
+                _progress(f"state=Train trial={trial_no}/{train_trials}")
 
                 train_prompt = (
                     task_header
@@ -354,14 +442,16 @@ Environment:
                 )
 
                 chat3 = run_step(model_trainer, "Train", train_prompt)
-                out = execute_code(chat3)
+                out = execute_code(chat3, "Train")
                 ok = ("exitcode: 1" not in out)
 
                 if ok:
+                    _progress(f"state=Train trial={trial_no} succeeded")
                     mem.append({"type": "train_trial", "trial": trial_no, "ok": True})
                     ckpt.train_trials_done += 1
                     save_checkpoint(run_dir, ckpt)
                 else:
+                    _progress(f"state=Train trial={trial_no} failed")
                     # Failure: do NOT count this trial; stay in Train and try again
                     train_failure_count += 1
                     error_snip = _summarize_executor_error(out)
@@ -389,6 +479,7 @@ Environment:
 
         # --- Summarize ---
         if ckpt.current_state in ["Summarize"]:
+            _progress("state=Summarize running")
             summary_prompt = task_header + "\nSummarize the workflow and provide final integrated python code."
             chat4 = initializer.initiate_chat(summarizer, message=summary_prompt, max_turns=1)
 
@@ -396,10 +487,10 @@ Environment:
             content = chat4.chat_history[-1]["content"]
             if "```python" in content:
                 code = content.split("```python")[1].split("```")[0].strip()
-                saved_train_file = artifacts_dir / "train_file_by_agent.py"
+                saved_train_file = coding_dir / "train_file_by_agent.py"
                 saved_train_file.write_text(code, encoding="utf-8")
 
-            (artifacts_dir / "chat_history.json").write_text(
+            (coding_dir / "chat_history.json").write_text(
                 __import__("json").dumps(chat4.chat_history, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
@@ -414,6 +505,7 @@ Environment:
 
             ckpt.current_state = "End"
             save_checkpoint(run_dir, ckpt)
+            _progress("state=Summarize done | workflow completed")
 
         return {
             "data_path": data_path,

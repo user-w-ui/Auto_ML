@@ -1,0 +1,17 @@
+services:
+  automl:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    working_dir: /app
+    env_file:
+      - .env
+    environment:
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-chat}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+    volumes:
+      - ./:/app
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    command: ["python", "cli.py", "run", "--foreground", "--config", "configs/container.yaml"]

@@ -42,13 +42,11 @@ def main() -> int:
         s.status = "succeeded"
         s.error = None
         save_status(layout, s)
-
-        ckpt.current_state = "End"
-        save_checkpoint(layout.run_dir, ckpt)
         return 0
 
     except Exception as e:
-        events.emit("run_failed", run_id=run_id, error=str(e), current_state=ckpt.current_state)
+        latest_ckpt = load_or_init_checkpoint(run_id, layout.run_dir)
+        events.emit("run_failed", run_id=run_id, error=str(e), current_state=latest_ckpt.current_state)
         s.status = "failed"
         s.error = str(e)
         save_status(layout, s)

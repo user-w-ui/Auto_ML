@@ -105,6 +105,43 @@ The workflow will automatically:
 4. Generate visualization charts
 5. Output code and summary
 
+### Run Entire Project in Docker (Recommended for Path Consistency)
+
+When you run the whole project in one container, the app and dataset share the same filesystem view, so CSV path issues are avoided.
+
+1. Ensure `.env` contains your API key values.
+
+2. Build and run with Docker Compose:
+
+```bash
+docker compose build
+docker compose run --rm automl
+```
+
+The compose command runs in foreground mode, so you will see live workflow progress logs (state transitions and trial progress) directly in the terminal.
+
+Output layout per run is now standardized under `runs/<run_id>/`:
+
+- `plot/`: charts and image outputs
+- `data/`: csv/json/pkl/joblib/parquet/xlsx outputs
+- `coding/`: generated code snapshots and final integrated code
+
+This means generated artifacts should no longer be scattered in the project root.
+
+3. The container uses `configs/container.yaml`, which sets:
+
+- `data.path: /app/house_prices_train.csv`
+- `execution.code_executor_backend: local-jupyter`
+
+`local-jupyter` is intentional here because the main app is already running in Docker. This keeps execution in the same container filesystem and avoids host-path visibility issues.
+
+Optional checks inside container:
+
+```bash
+docker compose run --rm automl ls -la /app
+docker compose run --rm automl python -c "import pandas as pd; print(pd.read_csv('/app/house_prices_train.csv').shape)"
+```
+
 ### Docker Isolated Execution
 
 For isolated code execution in a Docker container:

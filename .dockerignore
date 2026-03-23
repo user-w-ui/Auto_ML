@@ -1,0 +1,11 @@
+.git
+.vscode
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.log
+.env
+runs
+history results
+coding_test_docker

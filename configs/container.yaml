@@ -1,0 +1,20 @@
+job:
+  name: "house-prices-container"
+
+data:
+  path: "/app/house_prices_train.csv"
+  target: "SalePrice"
+  task_type: "regression"
+
+execution:
+  code_executor_backend: "local-jupyter"
+
+workflow:
+  max_rounds: 20
+  train_trials: 2
+
+rag:
+  kb_dir: "/app/kb"
+  top_k: 4
+  ollama_base_url: "http://host.docker.internal:11434"
+  ollama_model: "nomic-embed-text"
