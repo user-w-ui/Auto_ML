@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 
 import autogen
 from autogen import OpenAIWrapper
@@ -60,12 +60,7 @@ def _build_rag_injector(config: Dict[str, Any], run_dir: Path):
     )
 
     def rag_context(query: str) -> str:
-        results = index.search(
-            query=query,
-            top_k=top_k,
-            ollama_base_url=ollama_base_url,
-            ollama_model=ollama_model,
-        )
+        results = index.search(query=query, top_k=top_k, ollama_base_url=ollama_base_url, ollama_model=ollama_model)
         blocks = []
         for score, chunk in results:
             blocks.append(f"[{chunk.doc_id}#{chunk.chunk_id} score={score:.3f}]\n{chunk.text}")
@@ -88,11 +83,7 @@ def _extract_last_executor_output(chat_result) -> str:
 
 def _memory_context(mem: RunMemory, n: int = 12) -> str:
     """
-    System-message injection: last N memory records.
-
-    This is a lightweight "episodic memory" injection:
-    - We don't do extra retrieval yet.
-    - Just provide recent run events to reduce repetition / improve recovery.
+    System-message injection: last N memory records (episodic memory).
     """
     tail = mem.tail(n=n).strip()
     if not tail:
@@ -105,18 +96,28 @@ def _memory_context(mem: RunMemory, n: int = 12) -> str:
     )
 
 
+def _summarize_executor_error(executor_output: str, max_chars: int = 900) -> str:
+    """
+    Make an error snippet short enough for prompt injection.
+    We keep the tail part because it often includes stack trace bottom / error type.
+    """
+    s = (executor_output or "").strip()
+    if not s:
+        return "Unknown executor error (empty output)."
+    # Keep last N chars (often contains the real exception line)
+    if len(s) > max_chars:
+        s = s[-max_chars:]
+    return s
+
+
 def run_workflow(config: Dict[str, Any], run_dir: Optional[Path] = None, resume: bool = True) -> Dict[str, Any]:
     """
-    Minimal end-to-end workflow with REAL checkpoint/resume.
+    Minimal end-to-end workflow with checkpoint/resume + RAG + run memory.
 
-    Key skills learned here:
-    - state machine (explicit states)
-    - recoverable (checkpoint + resume)
-    - RAG knowledge injection (embedding)
-    - run memory (append-only JSONL)
-
-    NEW in this version:
-    - system_message injection of recent run memory (episodic memory)
+    Updated behavior:
+    - Train trial failures DO NOT terminate the run.
+    - Failed trials are not counted.
+    - We record failures and inject a temporary "do-not-repeat" memory into the next Train prompt.
     """
     _ensure_windows_scripts_on_path()
     os.environ.setdefault("KG_WS_PING_INTERVAL_SECS", "0")
@@ -141,7 +142,10 @@ def run_workflow(config: Dict[str, Any], run_dir: Optional[Path] = None, resume:
     task_type = str(data_cfg.get("task_type", "regression"))
 
     train_trials = int(workflow_cfg.get("train_trials", 2))
-    max_rounds = int(workflow_cfg.get("max_rounds", 20))  # not heavily used now, kept for future
+    max_rounds = int(workflow_cfg.get("max_rounds", 20))  # kept for future, not heavily used now
+
+    # prevent infinite failing in Train
+    max_train_failures = int(workflow_cfg.get("max_train_failures", 6))
 
     executor_backend = str(exec_cfg.get("code_executor_backend", os.environ.get("CODE_EXECUTOR_BACKEND", "local-jupyter"))).strip().lower()
     docker_image = exec_cfg.get("docker_jupyter_image") or os.environ.get("DOCKER_JUPYTER_IMAGE") or None
@@ -151,10 +155,26 @@ def run_workflow(config: Dict[str, Any], run_dir: Optional[Path] = None, resume:
 
     rag_context = _build_rag_injector(config, run_dir)
 
-    # ====== memory injection (computed once per run init; light + stable) ======
-    # Note: we compute it once here (not re-reading each step), to avoid excessive file reads.
-    # If you want "live memory" injection, call _memory_context(mem) inside run_step instead.
+    # memory injection (episodic memory)
     mem_ctx = _memory_context(mem, n=12)
+
+    # ===== temporary per-run memory (for "do not repeat") =====
+    # This is separate from mem_ctx: it is guaranteed to reflect this run's latest failures.
+    TEMP_MEMORY_LIMIT = 5
+    temp_train_failures: List[str] = []
+    train_failure_count = 0
+
+    def temp_train_memory_context() -> str:
+        if not temp_train_failures:
+            return ""
+        items = temp_train_failures[-TEMP_MEMORY_LIMIT:]
+        joined = "\n\n---\n\n".join(items)
+        return (
+            "Recent Train Failures (do NOT repeat the same approach):\n"
+            + joined
+            + "\n\n"
+            + "You must change the model choice or preprocessing approach to avoid repeating the same error.\n"
+        )
 
     # Agents
     initializer = autogen.UserProxyAgent(name="Init", code_execution_config=False)
@@ -241,7 +261,7 @@ Environment:
 
     def run_step(agent, step_name: str, prompt: str):
         ckpt.current_state = step_name  # type: ignore
-        ckpt.bump_attempt(step_name)  # type: ignore
+        ckpt.bump_attempt(step_name)    # type: ignore
         save_checkpoint(run_dir, ckpt)
 
         mem.append({"type": "state_enter", "state": step_name})
@@ -254,7 +274,6 @@ Environment:
         return chat
 
     def execute_code(prev_chat) -> str:
-        # Execute code by sending previous agent content to Code_Executor
         content = prev_chat.chat_history[-1]["content"]
         exec_chat = initializer.initiate_chat(code_executor, message=content, max_turns=1)
         out = _extract_last_executor_output(exec_chat)
@@ -288,11 +307,7 @@ Environment:
                 if not ok:
                     raise RuntimeError("Preprocess code execution failed (see executor output).")
 
-                # Ask decision model (same as your previous is_ready_for_train)
-                ready = is_ready_for_train(
-                    groupchat=type("X", (), {"messages": chat2.chat_history})(),  # minimal adapter
-                    client=client,
-                )
+                ready = is_ready_for_train(messages=chat2.chat_history, client=client)
                 mem.append({"type": "decision", "state": "Preprocess", "ready_for_train": bool(ready)})
 
                 if ready:
@@ -300,7 +315,6 @@ Environment:
                     save_checkpoint(run_dir, ckpt)
                     break
                 else:
-                    # go back to Explore once, to avoid infinite preprocess loop
                     ckpt.current_state = "Explore"
                     save_checkpoint(run_dir, ckpt)
 
@@ -315,21 +329,60 @@ Environment:
                     ckpt.current_state = "Preprocess"
                     save_checkpoint(run_dir, ckpt)
 
-        # --- Train (fixed number of trials) ---
+        # --- Train (fixed number of successful trials; failures do not terminate) ---
         if ckpt.current_state in ["Train"]:
             while ckpt.train_trials_done < train_trials:
+                if train_failure_count >= max_train_failures:
+                    # Give up to avoid infinite loop, but we still produce memory + checkpoint.
+                    mem.append(
+                        {
+                            "type": "train_abort",
+                            "reason": "max_train_failures reached",
+                            "max_train_failures": max_train_failures,
+                            "train_trials_done": ckpt.train_trials_done,
+                        }
+                    )
+                    raise RuntimeError(f"Too many train failures ({train_failure_count}). Aborting run.")
+
                 trial_no = ckpt.train_trials_done + 1
-                train_prompt = task_header + f"\nTrain iteration {trial_no}/{train_trials}: train a model and evaluate. Save plots."
+
+                train_prompt = (
+                    task_header
+                    + "\n"
+                    + temp_train_memory_context()
+                    + f"\nTrain iteration {trial_no}/{train_trials}: train a model and evaluate. Save plots."
+                )
+
                 chat3 = run_step(model_trainer, "Train", train_prompt)
                 out = execute_code(chat3)
                 ok = ("exitcode: 1" not in out)
-                mem.append({"type": "train_trial", "trial": trial_no, "ok": ok})
-                if not ok:
-                    # don't count failed trial
-                    raise RuntimeError(f"Train trial {trial_no} failed (see executor output).")
 
-                ckpt.train_trials_done += 1
-                save_checkpoint(run_dir, ckpt)
+                if ok:
+                    mem.append({"type": "train_trial", "trial": trial_no, "ok": True})
+                    ckpt.train_trials_done += 1
+                    save_checkpoint(run_dir, ckpt)
+                else:
+                    # Failure: do NOT count this trial; stay in Train and try again
+                    train_failure_count += 1
+                    error_snip = _summarize_executor_error(out)
+
+                    # 1) persistent memory
+                    mem.append(
+                        {
+                            "type": "train_trial",
+                            "trial": trial_no,
+                            "ok": False,
+                            "error_snippet": error_snip,
+                        }
+                    )
+
+                    # 2) temporary per-run memory to prevent repeating the same approach
+                    temp_train_failures.append(
+                        f"Trial {trial_no} failed with executor error:\n{error_snip}"
+                    )
+
+                    # continue loop without incrementing train_trials_done
+                    continue
 
             ckpt.current_state = "Summarize"
             save_checkpoint(run_dir, ckpt)
@@ -339,7 +392,6 @@ Environment:
             summary_prompt = task_header + "\nSummarize the workflow and provide final integrated python code."
             chat4 = initializer.initiate_chat(summarizer, message=summary_prompt, max_turns=1)
 
-            # Save integrated code if present
             saved_train_file = None
             content = chat4.chat_history[-1]["content"]
             if "```python" in content:
@@ -370,6 +422,7 @@ Environment:
             "executor_backend": executor_backend,
             "run_memory": str(mem.path),
             "checkpoint": str((run_dir / "state.json")),
+            "train_failures": train_failure_count,
         }
 
     finally:
