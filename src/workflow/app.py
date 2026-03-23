@@ -40,8 +40,10 @@ def build_llm_config_from_env() -> Dict[str, Any]:
 def _build_rag_injector(config: Dict[str, Any], run_dir: Path):
     kb_dir = Path(config.get("rag", {}).get("kb_dir", "kb"))
     if not kb_dir.exists():
+
         def _empty(_q: str) -> str:
             return ""
+
         return _empty
 
     rag_cfg = config.get("rag", {})
@@ -58,7 +60,12 @@ def _build_rag_injector(config: Dict[str, Any], run_dir: Path):
     )
 
     def rag_context(query: str) -> str:
-        results = index.search(query=query, top_k=top_k, ollama_base_url=ollama_base_url, ollama_model=ollama_model)
+        results = index.search(
+            query=query,
+            top_k=top_k,
+            ollama_base_url=ollama_base_url,
+            ollama_model=ollama_model,
+        )
         blocks = []
         for score, chunk in results:
             blocks.append(f"[{chunk.doc_id}#{chunk.chunk_id} score={score:.3f}]\n{chunk.text}")
@@ -79,6 +86,25 @@ def _extract_last_executor_output(chat_result) -> str:
     return ""
 
 
+def _memory_context(mem: RunMemory, n: int = 12) -> str:
+    """
+    System-message injection: last N memory records.
+
+    This is a lightweight "episodic memory" injection:
+    - We don't do extra retrieval yet.
+    - Just provide recent run events to reduce repetition / improve recovery.
+    """
+    tail = mem.tail(n=n).strip()
+    if not tail:
+        return ""
+    return (
+        "Recent Run Memory (JSONL, newest last):\n"
+        + tail
+        + "\n\n"
+        + "Use this memory to avoid repeating failed steps and to reuse what already worked.\n"
+    )
+
+
 def run_workflow(config: Dict[str, Any], run_dir: Optional[Path] = None, resume: bool = True) -> Dict[str, Any]:
     """
     Minimal end-to-end workflow with REAL checkpoint/resume.
@@ -88,6 +114,9 @@ def run_workflow(config: Dict[str, Any], run_dir: Optional[Path] = None, resume:
     - recoverable (checkpoint + resume)
     - RAG knowledge injection (embedding)
     - run memory (append-only JSONL)
+
+    NEW in this version:
+    - system_message injection of recent run memory (episodic memory)
     """
     _ensure_windows_scripts_on_path()
     os.environ.setdefault("KG_WS_PING_INTERVAL_SECS", "0")
@@ -122,6 +151,11 @@ def run_workflow(config: Dict[str, Any], run_dir: Optional[Path] = None, resume:
 
     rag_context = _build_rag_injector(config, run_dir)
 
+    # ====== memory injection (computed once per run init; light + stable) ======
+    # Note: we compute it once here (not re-reading each step), to avoid excessive file reads.
+    # If you want "live memory" injection, call _memory_context(mem) inside run_step instead.
+    mem_ctx = _memory_context(mem, n=12)
+
     # Agents
     initializer = autogen.UserProxyAgent(name="Init", code_execution_config=False)
 
@@ -129,7 +163,8 @@ def run_workflow(config: Dict[str, Any], run_dir: Optional[Path] = None, resume:
         name="Data_Explorer",
         llm_config=llm_config,
         system_message=(
-            rag_context("tabular dataset exploration checklist, missing values, target distribution, plots")
+            mem_ctx
+            + rag_context("tabular dataset exploration checklist, missing values, target distribution, plots")
             + """
 You are the data explorer. Write code to explore dataset characteristics (shape, head, info/describe, missing values, target distribution, basic plots).
 Do NOT train models.
@@ -142,7 +177,8 @@ If you think the data is ready and no more exploration is needed, reply exactly:
         name="Data_Processer",
         llm_config=llm_config,
         system_message=(
-            rag_context("tabular preprocessing checklist: missing values, categorical encoding, leakage prevention, pipeline")
+            mem_ctx
+            + rag_context("tabular preprocessing checklist: missing values, categorical encoding, leakage prevention, pipeline")
             + """
 You are the data processer. Clean/prepare the dataset for model training.
 Handle missing values, encode categorical variables, scale when helpful.
@@ -155,7 +191,8 @@ Avoid inplace=True.
         name="Model_Trainer",
         llm_config=llm_config,
         system_message=(
-            rag_context("tabular regression modeling, baselines, boosting models, metrics, residual plots")
+            mem_ctx
+            + rag_context("tabular regression modeling, baselines, boosting models, metrics, residual plots")
             + """
 You are the model trainer. Train ONE model per iteration.
 Use 70/30 train/test split. Evaluate and save plots as images.
@@ -168,7 +205,8 @@ Try a different model or different hyperparameters each iteration. No grid searc
         name="Code_Summarizer",
         llm_config=llm_config,
         system_message=(
-            rag_context("write a concise ML report with metrics table and plot references")
+            mem_ctx
+            + rag_context("write a concise ML report with metrics table and plot references")
             + """
 You are the code summarizer. Integrate all error-free code into a single runnable snippet.
 Summarize exploration, preprocessing, training, and conclude best model.
@@ -203,7 +241,7 @@ Environment:
 
     def run_step(agent, step_name: str, prompt: str):
         ckpt.current_state = step_name  # type: ignore
-        ckpt.bump_attempt(step_name)    # type: ignore
+        ckpt.bump_attempt(step_name)  # type: ignore
         save_checkpoint(run_dir, ckpt)
 
         mem.append({"type": "state_enter", "state": step_name})
@@ -251,7 +289,10 @@ Environment:
                     raise RuntimeError("Preprocess code execution failed (see executor output).")
 
                 # Ask decision model (same as your previous is_ready_for_train)
-                ready = is_ready_for_train(groupchat=type("X", (), {"messages": chat2.chat_history})(), client=client)  # minimal adapter
+                ready = is_ready_for_train(
+                    groupchat=type("X", (), {"messages": chat2.chat_history})(),  # minimal adapter
+                    client=client,
+                )
                 mem.append({"type": "decision", "state": "Preprocess", "ready_for_train": bool(ready)})
 
                 if ready:
@@ -262,7 +303,7 @@ Environment:
                     # go back to Explore once, to avoid infinite preprocess loop
                     ckpt.current_state = "Explore"
                     save_checkpoint(run_dir, ckpt)
-                    # Explore once then come back
+
                     explore_prompt = task_header + "\nDo any additional exploration needed based on preprocessing results."
                     chatx = run_step(data_explorer, "Explore", explore_prompt)
                     outx = execute_code(chatx)
@@ -270,6 +311,7 @@ Environment:
                     mem.append({"type": "state_exit", "state": "Explore", "ok": okx})
                     if not okx:
                         raise RuntimeError("Explore (after preprocess) failed.")
+
                     ckpt.current_state = "Preprocess"
                     save_checkpoint(run_dir, ckpt)
 
@@ -309,7 +351,14 @@ Environment:
                 __import__("json").dumps(chat4.chat_history, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
-            mem.append({"type": "state_exit", "state": "Summarize", "ok": True, "saved_train_file": str(saved_train_file) if saved_train_file else None})
+            mem.append(
+                {
+                    "type": "state_exit",
+                    "state": "Summarize",
+                    "ok": True,
+                    "saved_train_file": str(saved_train_file) if saved_train_file else None,
+                }
+            )
 
             ckpt.current_state = "End"
             save_checkpoint(run_dir, ckpt)
