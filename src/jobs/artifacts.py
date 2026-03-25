@@ -15,7 +15,6 @@ from pathlib import Path
 class RunLayout:
     run_id: str
     run_dir: Path
-    artifacts_dir: Path
     logs_dir: Path
 
     @staticmethod
@@ -24,11 +23,9 @@ class RunLayout:
         return RunLayout(
             run_id=run_id,
             run_dir=run_dir,
-            artifacts_dir=run_dir / "artifacts",
             logs_dir=run_dir / "logs",
         )
 
     def ensure_dirs(self) -> None:
         self.run_dir.mkdir(parents=True, exist_ok=True)
-        self.artifacts_dir.mkdir(parents=True, exist_ok=True)
         self.logs_dir.mkdir(parents=True, exist_ok=True)
