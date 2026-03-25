@@ -1,8 +1,10 @@
 # Python cache
 __pycache__/
 *.py[cod]
+*.pyc
 *.pyo
 *.pyd
+*.so
 
 # Virtual environments
 .venv/
@@ -10,8 +12,14 @@ venv/
 env/
 
 # Environment files
-.env*
+.env
 !.env.example
+
+# IDE and editor settings
+.vscode/
+.idea/
+*.swp
+*.swo
 
 # Build and packaging
 build/
@@ -24,12 +32,32 @@ dist/
 .ruff_cache/
 .ipynb_checkpoints/
 
+# Data files (large)
+*.pkl
+*.joblib
+*.h5
+*.pt
+*.pth
+
+# CSV data files (except example configs)
+*.csv
+!configs/
+
+# Logs and temporary files
+*.log
+jupyter_gateway.log
+
 # Project runtime outputs
 coding/
 artifacts/
 train_file_by_agent.py
-jupyter_gateway.log
 house_prices_processed.csv
 runs/
-__pycache__/
 history results/
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+.vscode/
