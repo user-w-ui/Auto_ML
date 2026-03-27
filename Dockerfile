@@ -13,6 +13,9 @@ RUN apt-get update \
 COPY pyproject.toml README.md /app/
 COPY src /app/src
 COPY cli.py main.py utils.py /app/
+COPY configs /app/configs
+COPY kb /app/kb
+COPY house_prices_train.csv /app/house_prices_train.csv
 
 RUN pip install --upgrade pip \
     && pip install -e .

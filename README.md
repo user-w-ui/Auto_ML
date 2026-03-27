@@ -1,65 +1,38 @@
 # Automated Machine Learning Workflow
 
-A personal project implementing an intelligent, automated machine learning workflow powered by AG2. This system orchestrates multiple AI agents to automatically analyze datasets, preprocess data, and train machine learning models end-to-end.
+An AG2-based multi-agent pipeline that automates tabular ML end-to-end: exploration, preprocessing, training, and summarization.
 
-## Key Capabilities
+## What This Project Does
 
-The workflow automates the entire ML pipeline:
+The workflow uses a state-machine style orchestration:
 
-1. **Data Analysis & Exploration**: Automatically explore dataset characteristics, distributions, and patterns.
-2. **Data Preprocessing**: Remove duplicates, handle missing values, encode categorical features, and scale numerical data.
-3. **Model Training**: Train and compare multiple algorithms to find the best-performing model.
+1. `Explore`: profile data and generate exploratory code.
+2. `Preprocess`: clean and transform features.
+3. `Train`: train and compare models in multiple trials.
+4. `Summarize`: produce final summary and artifacts.
 
-## Details
+At each step, an LLM agent proposes code and a code executor runs it. Failed execution keeps the workflow in the same state for retry.
 
-The workflow follows the steps of data analysis, preprocessing, and model training. Each step is executed by a specific agent, and the transition between steps is determined by the success or failure of the previous step.
+## Core Features
 
-We follow a state machine design to build the machine learning workflow:
-
-- **`Init`** and **`End`**: Represent the start and end of the workflow.
-- **`Explore`**: Analyze the dataset.
-  - **Agents**: Data Explorer → Code Executor
-  - **Transition**: If code execution is successful, move to `Preprocess`; otherwise, remain in `Explore`.
-- **`Preprocess`**: Clean and prepare data.
-  - **Agents**: Data Preprocessor → Code Executor
-  - **Transition**: A language model determines whether all necessary preprocessing steps have been completed. If yes, move to `Train`; otherwise, return to `Explore` for further analysis.
-- **`Train`**: Train a machine learning model.
-  - **Agents**: Model Trainer → Code Executor
-  - **Transition**: The model is trained in two iterations to compare performance. If the maximum trials are reached, move to `Summarize`. If code execution fails, remain in `Train` (failed trials do not count).
-- **`Summarize`**: Generate a summary of the workflow.
-  - **Agents**: Summarizer
-  - **Transition**: Always moves to `End`.
-
-At the `Explore`, `Preprocess`, and `Train` states:
-
-- A **language model agent** is invoked first.
-- A **code executor** then executes the generated code.
-- If execution fails, the workflow remains in the same state.
-- If execution succeeds, conditions are checked to determine whether to transition to the next state.
-
-This structured workflow ensures an efficient and iterative approach to machine learning model building.
-
-## AG2 Features
-
-This project demonstrates the following AG2 features:
-
-- [GroupChat with custom speaker transitions](https://docs.ag2.ai/docs/use-cases/notebooks/notebooks/agentchat_groupchat_customized#group-chat-with-customized-speaker-selection-method)
-- [Build with StateFlow design](https://docs.ag2.ai/docs/blog/2024-02-29-StateFlow/index#stateflow-build-state-driven-workflows-with-customized-speaker-selection-in-groupchat)
-- [Code Execution](https://docs.ag2.ai/docs/user-guide/advanced-concepts/code-execution#code-execution)
-
-## TAGS
-
-TAGS: data analysis, groupchat, stateflow, code execution, kaggle, automated machine learning, workflow automation, model training, data preprocessing, state machine, hyperparameter tuning
+- Multi-agent orchestration with AG2 `GroupChat` custom speaker transitions.
+- Stateful workflow transitions (`Explore -> Preprocess -> Train -> Summarize`).
+- Two execution backends:
+  - `local-jupyter`
+  - `docker-jupyter`
+- RAG support from local knowledge base (`kb/`) using Ollama embeddings.
+- Job-style run management with `run_id`, status tracking, and structured artifacts.
 
 ## Prerequisites
 
-- Python 3.12 or higher
-- DeepSeek API key (or compatible OpenAI-format LLM API)
-- Docker (optional, for isolated code execution)
+- Python 3.12+
+- DeepSeek API key (or OpenAI-compatible endpoint)
+- Docker (optional)
+- Ollama (optional, only needed when using RAG embedding/indexing)
 
 ## Installation
 
-1. Clone this repository:
+1. Clone and enter project:
 
 ```bash
 git clone https://github.com/user-w-ui/Auto_ML.git
@@ -72,99 +45,187 @@ cd Auto_ML
 pip install -e .
 ```
 
-3. Create and configure `.env` file:
+3. Configure environment variables:
 
 ```bash
 cp .env.example .env
-# Edit .env with your DeepSeek API key
+```
+
+Minimal required fields in `.env`:
+
+```env
 DEEPSEEK_API_KEY=your_api_key_here
 DEEPSEEK_BASE_URL=https://api.deepseek.com
 DEEPSEEK_MODEL=deepseek-chat
 ```
 
-   Or set environment variables directly:
-   ```powershell
-   $env:DEEPSEEK_API_KEY="your_api_key"
-   ```
+PowerShell alternative:
 
+```powershell
+$env:DEEPSEEK_API_KEY="your_api_key"
+```
 
-## Usage
+## Configuration Files
 
-### Basic Example
+- `configs/example.yaml`: local development defaults.
+- `configs/container.yaml`: container-friendly paths and settings.
 
-Run the automated ML workflow:
+Important fields:
+
+- `data.path`: input CSV path
+- `data.target`: target column name
+- `execution.code_executor_backend`: `local-jupyter` or `docker-jupyter`
+- `workflow.train_trials`: number of training trials
+- `workflow.max_rounds`: max group chat rounds
+
+## Run Methods
+
+### Recommended: CLI Job Mode
+
+Create one run with generated `run_id`:
+
+```bash
+python cli.py run --config configs/example.yaml
+```
+
+Foreground mode (stream workflow logs to terminal):
+
+```bash
+python cli.py run --foreground --config configs/example.yaml
+```
+
+Custom run id:
+
+```bash
+python cli.py run --config configs/example.yaml --run-id my_run_001
+```
+
+List runs:
+
+```bash
+python cli.py list
+```
+
+Query a run status:
+
+```bash
+python cli.py status --run-id <run_id>
+```
+
+### Legacy Direct Mode
+
+You can still run directly via:
 
 ```bash
 python main.py
 ```
 
-The workflow will automatically:
-1. Analyze the dataset (`house_prices_train.csv`)
-2. Preprocess and clean the data
-3. Train multiple models and compare performance
-4. Generate visualization charts
-5. Output code and summary
+This writes to `runs/manual_run/` and is useful for quick local debugging, but `cli.py` is preferred for traceable, multi-run job management.
 
-### Run Entire Project in Docker (Recommended for Path Consistency)
+## Status Monitoring and Observability
 
-When you run the whole project in one container, the app and dataset share the same filesystem view, so CSV path issues are avoided.
+Each run persists status and logs under `runs/<run_id>/`.
 
-1. Ensure `.env` contains your API key values.
+Key files:
 
-2. Build and run with Docker Compose:
+- `status.json`: current status (`running`, `succeeded`, `failed`), timestamps, pid, error.
+- `run_config.json`: snapshot of the exact config used for reproducibility.
+- `run_memory.jsonl`: short-term memory trail used by workflow steps.
+- `logs/events.jsonl`: structured lifecycle events (`run_started`, `run_succeeded`, `run_failed`).
+
+Useful monitoring commands:
+
+```bash
+python cli.py list
+python cli.py status --run-id <run_id>
+```
+
+PowerShell quick event tail:
+
+```powershell
+Get-Content runs/<run_id>/logs/events.jsonl -Tail 20
+```
+
+## Artifact Layout
+
+Standardized output structure per run:
+
+- `coding/`: generated step scripts (`001_Explore.py`, `002_Preprocess.py`, ...), `chat_history.json`, and merged training script snapshots.
+- `data/`: csv/json/joblib/parquet/xlsx artifacts.
+- `plot/`: image/chart artifacts.
+- `logs/`: structured run events.
+
+This avoids scattering generated files in the project root.
+
+## Docker
+
+### Docker Compose (Recommended)
+
+Run the full project in one container with mounted workspace:
 
 ```bash
 docker compose build
 docker compose run --rm automl
 ```
 
-The compose command runs in foreground mode, so you will see live workflow progress logs (state transitions and trial progress) directly in the terminal.
-
-Output layout per run is now standardized under `runs/<run_id>/`:
-
-- `plot/`: charts and image outputs
-- `data/`: csv/json/pkl/joblib/parquet/xlsx outputs
-- `coding/`: generated code snapshots and final integrated code
-
-This means generated artifacts should no longer be scattered in the project root.
-
-3. The container uses `configs/container.yaml`, which sets:
-
-- `data.path: /app/house_prices_train.csv`
-- `execution.code_executor_backend: local-jupyter`
-
-`local-jupyter` is intentional here because the main app is already running in Docker. This keeps execution in the same container filesystem and avoids host-path visibility issues.
-
-Optional checks inside container:
+Current compose command executes:
 
 ```bash
-docker compose run --rm automl ls -la /app
-docker compose run --rm automl python -c "import pandas as pd; print(pd.read_csv('/app/house_prices_train.csv').shape)"
+python cli.py run --foreground --config configs/container.yaml
 ```
 
-### Docker Isolated Execution
+Why `configs/container.yaml` uses `local-jupyter`:
 
-For isolated code execution in a Docker container:
+- The app itself is already running inside a container.
+- `local-jupyter` keeps code execution in the same filesystem namespace (`/app`).
+- This avoids host/container path mismatch for dataset and outputs.
+
+### Docker Image Direct Run (No Compose)
+
+Build image:
+
+```bash
+docker build -t automl-kaggle .
+```
+
+Run image directly:
+
+```bash
+docker run --rm --env-file .env automl-kaggle
+```
+
+Optional with host mount for persistent outputs:
+
+```bash
+docker run --rm --env-file .env -v ${PWD}:/app automl-kaggle
+```
+
+### Use Docker as Code Executor Backend (from Host Python)
+
+If running `python cli.py` on host but want sandboxed execution:
 
 ```powershell
 $env:CODE_EXECUTOR_BACKEND="docker-jupyter"
-python main.py
+python cli.py run --config configs/example.yaml --foreground
 ```
 
-Or specify a custom image:
+Optional custom executor image:
 
 ```powershell
-$env:CODE_EXECUTOR_BACKEND="docker-jupyter"
 $env:DOCKER_JUPYTER_IMAGE="your-custom-image"
-python main.py
+python cli.py run --config configs/example.yaml --foreground
 ```
 
-## References
+## AG2 References
 
-- **AG2 Framework**: This project uses [AG2](https://github.com/ag2ai/ag2) for multi-agent orchestration - [AG2 Documentation](https://docs.ag2.ai/latest/)
-- **Dataset**: House Prices dataset from Kaggle
-- **Technologies**: Python, Jupyter, AG2, Scikit-learn, XGBoost, LightGBM, CatBoost
+- [GroupChat with customized speaker transitions](https://docs.ag2.ai/docs/use-cases/notebooks/notebooks/agentchat_groupchat_customized#group-chat-with-customized-speaker-selection-method)
+- [StateFlow design pattern](https://docs.ag2.ai/docs/blog/2024-02-29-StateFlow/index#stateflow-build-state-driven-workflows-with-customized-speaker-selection-in-groupchat)
+- [Code Execution](https://docs.ag2.ai/docs/user-guide/advanced-concepts/code-execution#code-execution)
+
+## Tags
+
+data analysis, groupchat, stateflow, code execution, kaggle, automated machine learning, workflow automation, model training, data preprocessing, state machine, hyperparameter tuning
 
 ## License
 
-This project is licensed under the Apache License 2.0. See the [LICENSE](../LICENSE) for details.
+This project is licensed under Apache License 2.0. See [LICENSE](../LICENSE) for details.
