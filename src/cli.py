@@ -5,22 +5,22 @@ Commands (命令总览):
 - run:
     创建一次新运行，生成 run_id、目录结构、config snapshot，并把状态置为 running。
     Example:
-    python cli.py run --config configs/example.yaml
+    python -m src.cli run --config configs/example.yaml
 
 - status:
     查询某个 run_id 的 status.json。
     Example:
-    python cli.py status --run-id 20260322_135226_01fee3ff
+    python -m src.cli status --run-id 20260322_135226_01fee3ff
 
 - list:
     列出 runs/ 下所有历史运行（按名称倒序，通常也是时间倒序）。
     Example:
-    python cli.py list
+    python -m src.cli list
 
 Quick start:
-1) python cli.py run --config configs/example.yaml
-2) python cli.py list
-3) python cli.py status --run-id <your_run_id>
+1) python -m src.cli run --config configs/example.yaml
+2) python -m src.cli list
+3) python -m src.cli status --run-id <your_run_id>
 """
 
 from __future__ import annotations
@@ -38,9 +38,9 @@ import typer
 from src.config.load import load_config
 from src.jobs.artifacts import RunLayout
 from src.jobs.status import (
-    RunStatus,
     load_status,
-    save_status,
+    mark_status_failed,
+    reconcile_running_status,
     set_status_running,
 )
 from src.workflow.subprocess import spawn_workflow_process
@@ -49,6 +49,7 @@ from src.workflow.subprocess import spawn_workflow_process
 app = typer.Typer(add_completion=False, help="Auto_ML job runner (AG2 pipeline)")
 
 RUNS_DIR = Path("runs")
+
 
 # 为每次执行生成一个唯一的 run_id
 def make_run_id() -> str:
@@ -87,7 +88,7 @@ def run(
         json.dumps(cfg, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    
+
     if foreground:
         # 5) 前台运行：容器/终端内可直接看到实时输出
         set_status_running(layout, pid=None)
@@ -106,6 +107,11 @@ def run(
             str(config),
         ]
         rc = subprocess.call(cmd)
+        # 如果 runner 进程异常退出且未能写回最终状态，这里做一次兜底收口。
+        if rc != 0:
+            s_after = load_status(layout)
+            if s_after.status == "running":
+                mark_status_failed(layout, f"Foreground runner exited with code {rc} before final status update.")
         s = load_status(layout)
         typer.echo(f"Final status: {s.status}")
         if s.error:
@@ -120,12 +126,20 @@ def run(
         typer.echo(f"PID: {proc.pid}")
         typer.echo(f"Run dir: {layout.run_dir.resolve()}")
         typer.echo("Tip: check progress via:")
-        typer.echo(f"  python cli.py status --run-id {rid}")
+        typer.echo(f"  python -m src.cli status --run-id {rid}")
+
 
 @app.command()
-def status(run_id: str = typer.Option(..., "--run-id", "-r")):
+def status(
+    run_id: str = typer.Option(..., "--run-id", "-r"),
+    refresh: bool = typer.Option(True, "--refresh/--no-refresh", help="Auto-reconcile stale running status."),
+    stale_after: int = typer.Option(900, "--stale-after", help="Heartbeat timeout seconds for stale running runs."),
+):
     layout = RunLayout.from_run_id(run_id)
-    s = load_status(layout)
+    if refresh:
+        s = reconcile_running_status(layout, stale_after_seconds=stale_after)
+    else:
+        s = load_status(layout)
     typer.echo(json.dumps(s.model_dump(), ensure_ascii=False, indent=2))
 
 

@@ -11,7 +11,7 @@ import autogen
 from autogen import OpenAIWrapper
 from autogen.coding.jupyter import DockerJupyterServer, JupyterCodeExecutor, LocalJupyterServer
 
-from utils import analyze_code_execution_output, count_train_trials, did_code_execution_fail, is_ready_for_train
+from src.utils import analyze_code_execution_output, count_train_trials, did_code_execution_fail, is_ready_for_train
 from src.agent.definition import create_initializer, create_workflow_agents
 from src.rag.kb_index import MiniVectorIndex
 from src.rag.run_memory import RunMemory
@@ -59,16 +59,31 @@ def _build_rag_injector(config: Dict[str, Any], run_dir: Path):
 
     cache_path = run_dir / "kb_index.json"
     # 构建或加载向量索引，避免每次都全量重建。
-    index = MiniVectorIndex.build_or_load(
-        kb_dir=kb_dir,
-        cache_path=cache_path,
-        ollama_base_url=ollama_base_url,
-        ollama_model=ollama_model,
-    )
+    try:
+        index = MiniVectorIndex.build_or_load(
+            kb_dir=kb_dir,
+            cache_path=cache_path,
+            ollama_base_url=ollama_base_url,
+            ollama_model=ollama_model,
+        )
+    except Exception as e:
+        # Fail-open: RAG unavailable should not block the workflow.
+        _progress(f"RAG disabled: build/load index failed ({type(e).__name__}: {e})")
+
+        def _empty(_q: str) -> str:
+            return ""
+
+        return _empty
 
     def rag_context(query: str) -> str:
         # 检索知识块并格式化成统一上下文，供后续 Agent 提示词拼接。
-        results = index.search(query=query, top_k=top_k, ollama_base_url=ollama_base_url, ollama_model=ollama_model)
+        try:
+            results = index.search(query=query, top_k=top_k, ollama_base_url=ollama_base_url, ollama_model=ollama_model)
+        except Exception as e:
+            # Fail-open: one retrieval failure should not fail the run.
+            _progress(f"RAG retrieval skipped: {type(e).__name__}: {e}")
+            return ""
+
         blocks = []
         for score, chunk in results:
             blocks.append(f"[{chunk.doc_id}#{chunk.chunk_id} score={score:.3f}]\n{chunk.text}")

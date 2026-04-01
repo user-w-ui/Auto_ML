@@ -14,4 +14,4 @@ services:
       - ./:/app
     extra_hosts:
       - host.docker.internal:host-gateway
-    command: ["python", "cli.py", "run", "--foreground", "--config", "configs/container.yaml"]
+    command: ["python", "-m", "src.cli", "run", "--foreground", "--config", "configs/container.yaml"]

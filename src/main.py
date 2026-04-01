@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+
 from dotenv import load_dotenv
 
 from src.config.load import load_config
@@ -8,7 +9,7 @@ from src.workflow.app import run_workflow
 
 
 def main() -> None:
-    load_dotenv(Path(__file__).with_name(".env"))
+    load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
     cfg_path = Path("configs/example.yaml")
     cfg = load_config(cfg_path) if cfg_path.exists() else {}

@@ -85,31 +85,43 @@ Important fields:
 Create one run with generated `run_id`:
 
 ```bash
-python cli.py run --config configs/example.yaml
+python -m src.cli run --config configs/example.yaml
 ```
 
 Foreground mode (stream workflow logs to terminal):
 
 ```bash
-python cli.py run --foreground --config configs/example.yaml
+python -m src.cli run --foreground --config configs/example.yaml
 ```
 
 Custom run id:
 
 ```bash
-python cli.py run --config configs/example.yaml --run-id my_run_001
+python -m src.cli run --config configs/example.yaml --run-id my_run_001
 ```
 
 List runs:
 
 ```bash
-python cli.py list
+python -m src.cli list
 ```
 
 Query a run status:
 
 ```bash
-python cli.py status --run-id <run_id>
+python -m src.cli status --run-id <run_id>
+```
+
+Status command auto-reconciles stale `running` runs by default (process dead or heartbeat timeout):
+
+```bash
+python -m src.cli status --run-id <run_id> --stale-after 900
+```
+
+Disable auto-reconcile if you only want raw file content:
+
+```bash
+python -m src.cli status --run-id <run_id> --no-refresh
 ```
 
 ### Legacy Direct Mode
@@ -117,10 +129,10 @@ python cli.py status --run-id <run_id>
 You can still run directly via:
 
 ```bash
-python main.py
+python -m src.main
 ```
 
-This writes to `runs/manual_run/` and is useful for quick local debugging, but `cli.py` is preferred for traceable, multi-run job management.
+This writes to `runs/manual_run/` and is useful for quick local debugging, but `src.cli` is preferred for traceable, multi-run job management.
 
 ## Status Monitoring and Observability
 
@@ -136,8 +148,8 @@ Key files:
 Useful monitoring commands:
 
 ```bash
-python cli.py list
-python cli.py status --run-id <run_id>
+python -m src.cli list
+python -m src.cli status --run-id <run_id>
 ```
 
 PowerShell quick event tail:
@@ -171,7 +183,7 @@ docker compose run --rm automl
 Current compose command executes:
 
 ```bash
-python cli.py run --foreground --config configs/container.yaml
+python -m src.cli run --foreground --config configs/container.yaml
 ```
 
 Why `configs/container.yaml` uses `local-jupyter`:
@@ -202,18 +214,18 @@ docker run --rm --env-file .env -v ${PWD}:/app automl-kaggle
 
 ### Use Docker as Code Executor Backend (from Host Python)
 
-If running `python cli.py` on host but want sandboxed execution:
+If running `python -m src.cli` on host but want sandboxed execution:
 
 ```powershell
 $env:CODE_EXECUTOR_BACKEND="docker-jupyter"
-python cli.py run --config configs/example.yaml --foreground
+python -m src.cli run --config configs/example.yaml --foreground
 ```
 
 Optional custom executor image:
 
 ```powershell
 $env:DOCKER_JUPYTER_IMAGE="your-custom-image"
-python cli.py run --config configs/example.yaml --foreground
+python -m src.cli run --config configs/example.yaml --foreground
 ```
 
 ## AG2 References
