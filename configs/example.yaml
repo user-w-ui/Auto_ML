@@ -13,6 +13,8 @@ execution:
 workflow:
   max_rounds: 20
   train_trials: 2
+  preprocess_max_attempts: 3
+  train_max_attempts: 6
 
 rag:
   kb_dir: "kb"
