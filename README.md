@@ -237,7 +237,3 @@ python -m src.cli run --config configs/example.yaml --foreground
 ## Tags
 
 data analysis, groupchat, stateflow, code execution, kaggle, automated machine learning, workflow automation, model training, data preprocessing, state machine, hyperparameter tuning
-
-## License
-
-This project is licensed under Apache License 2.0. See [LICENSE](../LICENSE) for details.
