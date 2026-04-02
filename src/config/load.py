@@ -1,7 +1,6 @@
 """
 Config loader.
 
-你选的是 config.yaml 驱动（而不是一堆 CLI 参数），这在工程里非常常见：
 - 配置文件可版本控制（configs/example.yaml）
 - run 时保存 snapshot（run_config.json） => 可复现
 """
