@@ -398,8 +398,17 @@ def run_workflow(config: Dict[str, Any], run_dir: Optional[Path] = None) -> Dict
             # Preprocess 后通过判定函数决定进入 Train 或回到 Explore。
             if last_worker == "Data_Processer":
                 mem.append({"type": "state_exit", "state": "Preprocess", "ok": True})
-                ready = is_ready_for_train(groupchat=groupchat, client=client)
-                mem.append({"type": "decision", "state": "Preprocess", "ready_for_train": bool(ready)})
+                readiness = is_ready_for_train(groupchat=groupchat, client=client)
+                ready = bool(readiness.get("ready", False))
+                summary = str(readiness.get("summary", "")).strip()
+                mem.append(
+                    {
+                        "type": "decision",
+                        "state": "Preprocess",
+                        "ready_for_train": ready,
+                        "summary": summary,
+                    }
+                )
                 if ready:
                     _progress("state=Preprocess done | ready_for_train=true -> Train")
                     mem.append({"type": "state_enter", "state": "Train"})
@@ -411,6 +420,18 @@ def run_workflow(config: Dict[str, Any], run_dir: Optional[Path] = None) -> Dict
                     mem.append({"type": "state_enter", "state": "Train"})
                     return model_trainer
 
+                feedback_summary = summary or "Readiness check says preprocessing is still insufficient for training."
+                groupchat.messages.append(
+                    {
+                        "role": "system",
+                        "name": "Workflow_Controller",
+                        "content": (
+                            "Preprocess quality gate not passed. "
+                            f"Reason summary: {feedback_summary}\n"
+                            "Please revise the next exploration/preprocess step to directly resolve this reason."
+                        ),
+                    }
+                )
                 _progress("state=Preprocess done | ready_for_train=false -> Explore")
                 mem.append({"type": "state_enter", "state": "Explore"})
                 return data_explorer

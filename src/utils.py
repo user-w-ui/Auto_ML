@@ -3,7 +3,7 @@ import re
 
 
 def _extract_first_json_obj(text: str):
-    """Extract and parse the first JSON object found in text."""
+    """从文本中提取并解析第一个 JSON 对象（仅接受 dict）。"""
     s = (text or "").strip()
     if not s:
         return None
@@ -26,7 +26,8 @@ def _extract_first_json_obj(text: str):
         return None
 
 
-def is_ready_for_train(groupchat, client):
+def is_ready_for_train(groupchat, client) -> dict:
+    """让模型判断数据是否已满足训练条件，返回结构化判定结果。"""
     messages = [
         {
             "role": "system",
@@ -38,7 +39,11 @@ Return ONLY one JSON object and nothing else:
         }
     ] + groupchat.messages
 
-    response = client.create(messages=messages)
+    try:
+        response = client.create(messages=messages, response_format={"type": "json_object"})
+    except TypeError:
+        # Some OpenAI-compatible wrappers/backends may not support response_format.
+        response = client.create(messages=messages)
     response_str = client.extract_text_or_completion_object(response)[0]
 
     print("-" * 50)
@@ -47,18 +52,28 @@ Return ONLY one JSON object and nothing else:
 
     parsed = _extract_first_json_obj(response_str)
     if not parsed:
-        return False
+        return {
+            "ready": False,
+            "summary": "Model response is not valid JSON.",
+        }
 
-    decision = str(parsed.get("decision", "")).strip().lower()
-    if decision in {"ready_for_training", "ready for training"}:
-        return True
-    if decision in {"need_more_processing", "need more processing"}:
-        return False
-    return False
+    decision_raw = str(parsed.get("decision", "")).strip().lower()
+    summary = str(parsed.get("summary", "")).strip()
+
+    if decision_raw in {"ready_for_training", "ready for training"}:
+        return {
+            "ready": True,
+            "summary": summary,
+        }
+
+    return {
+        "ready": False,
+        "summary": summary,
+    }
 
 
 def did_code_execution_fail(executor_output: str) -> bool:
-    """Best-effort failure detection for notebook executor outputs."""
+    """基于执行输出做尽力失败检测，判断代码执行是否失败。"""
     text = str(executor_output or "")
     lowered = text.lower()
 
@@ -91,7 +106,7 @@ def did_code_execution_fail(executor_output: str) -> bool:
 
 
 def analyze_code_execution_output(executor_output: str) -> dict:
-    """Return structured diagnostics for code execution output."""
+    """分析执行输出并返回结构化诊断结果（失败、错误类型、错误信息等）。"""
     text = str(executor_output or "")
     lowered = text.lower()
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
@@ -137,6 +152,7 @@ def analyze_code_execution_output(executor_output: str) -> dict:
 
 
 def count_train_trials(groupchat):
+    """统计有效训练轮次：训练发言计数，紧随其后的失败执行会回退一次计数。"""
     messages = groupchat.messages
 
     tcount = 0
