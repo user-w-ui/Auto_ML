@@ -54,4 +54,13 @@ WORKFLOW_PROMPT_SPECS: List[PromptSpec] = [
         ),
         tool_names=None,
     ),
+    PromptSpec(
+        name="Evaluator",
+        rag_query="ml quality gate, data readiness checks, overfitting signals, train/eval acceptance criteria",
+        prompt=(
+            "You are the evaluator. Assess whether the previous stage output passes quality gates.\n"
+            "Provide concise pass/fail reasoning and concrete next-step guidance for replan when needed."
+        ),
+        tool_names=None,
+    ),
 ]

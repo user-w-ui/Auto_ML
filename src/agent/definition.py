@@ -53,6 +53,7 @@ def create_workflow_agents(
         "Data_Processer": "data_processer",
         "Model_Trainer": "model_trainer",
         "Code_Summarizer": "summarizer",
+        "Evaluator": "evaluator",
     }
     agents: Dict[str, autogen.AssistantAgent] = {}
 
