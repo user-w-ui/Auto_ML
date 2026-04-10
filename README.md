@@ -195,4 +195,4 @@ automate-ml-for-kaggle/
 
 ## Tags
 
-data analysis, groupchat, stateflow, code execution, kaggle, automated machine learning, workflow automation, model training, data preprocessing, state machine, hyperparameter tuning
+data analysis, groupchat, mlti agent, multi-agent, stateflow, code execution, kaggle, automated machine learning, workflow automation, model training, data preprocessing, state machine, hyperparameter tuning
