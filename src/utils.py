@@ -72,6 +72,48 @@ Return ONLY one JSON object and nothing else:
     }
 
 
+def decide_train_next_action(groupchat, client) -> dict:
+    """Ask model to decide next train action from latest training evidence."""
+    messages = [
+        {
+            "role": "system",
+            "content": """You are evaluating model-training progress.
+
+Decide one action based on recent improvement and metric stability:
+- continue_next_candidate: move to next model candidate in queue
+- retune_same_candidate: keep current model and tune hyperparameters again
+- finish_training: stop training loop and finalize
+
+Return ONLY one JSON object and nothing else:
+{"summary":"<short summary>","decision":"continue_next_candidate|retune_same_candidate|finish_training"}
+""",
+        }
+    ] + groupchat.messages
+
+    try:
+        response = client.create(messages=messages, response_format={"type": "json_object"})
+    except TypeError:
+        response = client.create(messages=messages)
+    response_str = client.extract_text_or_completion_object(response)[0]
+
+    parsed = _extract_first_json_obj(response_str)
+    if not parsed:
+        return {
+            "decision": "continue_next_candidate",
+            "summary": "Model response is not valid JSON.",
+        }
+
+    decision_raw = str(parsed.get("decision", "")).strip().lower()
+    summary = str(parsed.get("summary", "")).strip()
+    if decision_raw not in {"continue_next_candidate", "retune_same_candidate", "finish_training"}:
+        decision_raw = "continue_next_candidate"
+
+    return {
+        "decision": decision_raw,
+        "summary": summary,
+    }
+
+
 def did_code_execution_fail(executor_output: str) -> bool:
     """基于执行输出做尽力失败检测，判断代码执行是否失败。"""
     text = str(executor_output or "")

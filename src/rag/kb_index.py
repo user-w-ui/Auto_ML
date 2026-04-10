@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Tuple, Optional
 
 from src.rag.embeddings_ollama import ollama_embed
+
+
+KB_INDEX_CACHE_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -31,6 +35,29 @@ def chunk_text(text: str, max_chars: int = 900, overlap: int = 150) -> List[str]
             break
         i = max(0, j - overlap)
     return [c for c in chunks if c]
+
+
+def chunk_model_cards_by_heading(text: str) -> List[str]:
+    """
+    Split model-card markdown by second-level heading blocks.
+
+    Expected card heading format:
+    ## 1) Kernel Ridge Regression
+    """
+    normalized = text.replace("\r\n", "\n")
+    heading_re = re.compile(r"^##\s+\d+\)\s+.+$", re.MULTILINE)
+    matches = list(heading_re.finditer(normalized))
+    if not matches:
+        return chunk_text(normalized)
+
+    chunks: List[str] = []
+    for idx, match in enumerate(matches):
+        start = match.start()
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(normalized)
+        block = normalized[start:end].strip()
+        if block:
+            chunks.append(block)
+    return chunks
 
 
 def cosine(u: List[float], v: List[float]) -> float:
@@ -66,7 +93,11 @@ class MiniVectorIndex:
         chunks: List[KBChunk] = []
         for p in md_files:
             doc_id = p.name
-            parts = chunk_text(p.read_text(encoding="utf-8"))
+            text = p.read_text(encoding="utf-8")
+            if p.name == "ml_model_cards_for_rag.md":
+                parts = chunk_model_cards_by_heading(text)
+            else:
+                parts = chunk_text(text)
             for idx, part in enumerate(parts):
                 chunks.append(KBChunk(doc_id=doc_id, chunk_id=idx, text=part))
         return chunks
@@ -85,6 +116,8 @@ class MiniVectorIndex:
             data = json.loads(cache_path.read_text(encoding="utf-8"))
             # very simple cache validity check:
             if (
+                data.get("cache_version") == KB_INDEX_CACHE_VERSION
+                and
                 data.get("ollama_model") == ollama_model
                 and data.get("kb_dir") == str(Path(kb_dir).resolve())
                 and data.get("num_chunks") == len(chunks)
@@ -95,6 +128,7 @@ class MiniVectorIndex:
         vectors = ollama_embed(texts, model=ollama_model, base_url=ollama_base_url)
 
         payload = {
+            "cache_version": KB_INDEX_CACHE_VERSION,
             "kb_dir": str(Path(kb_dir).resolve()),
             "ollama_model": ollama_model,
             "num_chunks": len(chunks),

@@ -10,14 +10,21 @@ import autogen
 from autogen import OpenAIWrapper
 from autogen.coding.jupyter import DockerJupyterServer, JupyterCodeExecutor, LocalJupyterServer
 
-from src.utils import analyze_code_execution_output, count_train_trials, did_code_execution_fail, is_ready_for_train
+from src.utils import (
+    analyze_code_execution_output,
+    count_train_trials,
+    decide_train_next_action,
+    did_code_execution_fail,
+    is_ready_for_train,
+)
 from src.agent.definition import create_initializer, create_workflow_agents
-from src.rag.injector import build_rag_injector
+from src.agent.tools import create_rag_tool_registry
 from src.rag.run_memory import RunMemory
 from src.workflow.code_helpers import extract_python_code_blocks, sanitize_python_code, state_script_name
 from src.workflow.runtime_helpers import (
     build_llm_config_from_env,
     ensure_windows_scripts_on_path,
+    load_explorer_profile,
     memory_context,
     organize_generated_files,
     progress,
@@ -66,6 +73,7 @@ def run_workflow(config: Dict[str, Any], run_dir: Optional[Path] = None) -> Dict
     data_dir.mkdir(parents=True, exist_ok=True)
     coding_dir.mkdir(parents=True, exist_ok=True)
     logs_dir.mkdir(parents=True, exist_ok=True)
+    explorer_profile_path = data_dir / "explorer_dataset_profile.json"
 
     mem = RunMemory(run_dir / "run_memory.jsonl")
 
@@ -87,8 +95,10 @@ def run_workflow(config: Dict[str, Any], run_dir: Optional[Path] = None) -> Dict
     llm_config = build_llm_config_from_env()
     client = OpenAIWrapper(config_list=[llm_config])
 
-    # 组装 RAG 与历史记忆上下文，减少重复试错。
-    rag_context = build_rag_injector(config, run_dir, progress)
+    # 组装历史记忆上下文，并创建可调用的 RAG 工具注册表。
+    rag_cfg = config.get("rag", {}) if isinstance(config.get("rag", {}), dict) else {}
+    kb_dir = Path(rag_cfg.get("kb_dir", "kb"))
+    tool_registry = create_rag_tool_registry(kb_dir=kb_dir)
     mem_ctx = memory_context(mem)
 
     # 创建初始化器与各阶段 Agent。
@@ -96,8 +106,7 @@ def run_workflow(config: Dict[str, Any], run_dir: Optional[Path] = None) -> Dict
     workflow_agents = create_workflow_agents(
         llm_config=llm_config,
         mem_ctx=mem_ctx,
-        rag_context=rag_context,
-        tool_registry=None,
+        tool_registry=tool_registry,
     )
     data_explorer = workflow_agents["data_explorer"]
     data_processer = workflow_agents["data_processer"]
@@ -315,6 +324,28 @@ def run_workflow(config: Dict[str, Any], run_dir: Optional[Path] = None) -> Dict
 
             if last_worker == "Data_Explorer":
                 mem.append({"type": "state_exit", "state": WorkflowState.EXPLORE.value, "ok": True})
+                profile = load_explorer_profile(explorer_profile_path)
+                if not profile:
+                    mem.append(
+                        {
+                            "type": "decision",
+                            "state": WorkflowState.EXPLORE.value,
+                            "action": "retry_missing_or_invalid_profile",
+                            "profile_path": str(explorer_profile_path),
+                        }
+                    )
+                    groupchat.messages.append(
+                        {
+                            "role": "system",
+                            "name": "Workflow_Controller",
+                            "content": (
+                                "Explore output contract not satisfied. "
+                                f"Write a valid profile JSON at {explorer_profile_path} and retry."
+                            ),
+                        }
+                    )
+                    progress("state=EXPLORE contract invalid -> retry")
+                    return _schedule_state(WorkflowState.EXPLORE, groupchat, via="contract_retry")
                 progress("state=EXPLORE done -> PREPROCESS")
                 return _schedule_state(WorkflowState.PREPROCESS, groupchat)
 
@@ -382,6 +413,14 @@ def run_workflow(config: Dict[str, Any], run_dir: Optional[Path] = None) -> Dict
 
             if evaluate_target == WorkflowState.TRAIN:
                 trials_done = count_train_trials(groupchat)
+                decision_obj = decide_train_next_action(groupchat=groupchat, client=client)
+                decision = str(decision_obj.get("decision", "continue_next_candidate")).strip().lower()
+                summary = str(decision_obj.get("summary", "")).strip()
+
+                if trials_done >= train_trials:
+                    decision = "finish_training"
+                    summary = summary or "train_trials limit reached"
+
                 mem.append(
                     {
                         "type": "decision",
@@ -389,13 +428,40 @@ def run_workflow(config: Dict[str, Any], run_dir: Optional[Path] = None) -> Dict
                         "target": WorkflowState.TRAIN.value,
                         "train_trials_done": trials_done,
                         "train_trials_target": train_trials,
+                        "train_next_action": decision,
+                        "summary": summary,
                     }
                 )
-                if trials_done >= train_trials:
+
+                if decision == "finish_training":
                     progress("state=EVALUATE(TRAIN) passed -> DONE")
                     return _schedule_state(WorkflowState.DONE, groupchat)
 
-                progress("state=EVALUATE(TRAIN) continue -> TRAIN")
+                if decision == "retune_same_candidate":
+                    groupchat.messages.append(
+                        {
+                            "role": "system",
+                            "name": "Workflow_Controller",
+                            "content": (
+                                "Evaluator decision: retune_same_candidate. "
+                                f"Reason: {summary or 'need stability/metric improvement'}"
+                            ),
+                        }
+                    )
+                    progress("state=EVALUATE(TRAIN) retune -> TRAIN")
+                    return _schedule_state(WorkflowState.TRAIN, groupchat, via=WorkflowState.EVALUATE.value)
+
+                groupchat.messages.append(
+                    {
+                        "role": "system",
+                        "name": "Workflow_Controller",
+                        "content": (
+                            "Evaluator decision: continue_next_candidate. "
+                            f"Reason: {summary or 'continue search'}"
+                        ),
+                    }
+                )
+                progress("state=EVALUATE(TRAIN) continue next -> TRAIN")
                 return _schedule_state(WorkflowState.TRAIN, groupchat, via=WorkflowState.EVALUATE.value)
 
         if last_speaker is summarizer:

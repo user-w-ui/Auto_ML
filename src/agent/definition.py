@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Dict, Optional
 
 import autogen
 
@@ -13,12 +13,20 @@ from src.agent.tools import ToolRegistry, attach_tools
 class AgentProfile:
     name: str
     prompt: str
-    rag_query: Optional[str] = None
+    tool_names: Optional[list[str]] = None
 
 
-def _compose_system_message(profile: AgentProfile, mem_ctx: str, rag_context: Callable[[str], str]) -> str:
-    rag_block = rag_context(profile.rag_query) if profile.rag_query else ""
-    return (mem_ctx + rag_block + profile.prompt).strip()
+def _compose_system_message(profile: AgentProfile, mem_ctx: str, tool_registry: Optional[ToolRegistry]) -> str:
+    tool_block = ""
+    if profile.tool_names:
+        lines = []
+        for name in profile.tool_names:
+            spec = (tool_registry or {}).get(name)
+            if spec:
+                lines.append(f"- {spec.name}: {spec.description}")
+        if lines:
+            tool_block = "\n\nAvailable tools:\n" + "\n".join(lines) + "\n"
+    return (mem_ctx + profile.prompt + tool_block).strip()
 
 
 def create_initializer() -> autogen.UserProxyAgent:
@@ -29,23 +37,20 @@ def create_assistant_agent(
     profile: AgentProfile,
     llm_config: Dict[str, Any],
     mem_ctx: str,
-    rag_context: Callable[[str], str],
     tool_registry: Optional[ToolRegistry] = None,
-    tool_names: Optional[list[str]] = None,
 ) -> autogen.AssistantAgent:
     agent = autogen.AssistantAgent(
         name=profile.name,
         llm_config=llm_config,
-        system_message=_compose_system_message(profile, mem_ctx=mem_ctx, rag_context=rag_context),
+        system_message=_compose_system_message(profile, mem_ctx=mem_ctx, tool_registry=tool_registry),
     )
-    attach_tools(agent, tool_names=tool_names, registry=tool_registry or {})
+    attach_tools(agent, tool_names=profile.tool_names, registry=tool_registry or {})
     return agent
 
 
 def create_workflow_agents(
     llm_config: Dict[str, Any],
     mem_ctx: str,
-    rag_context: Callable[[str], str],
     tool_registry: Optional[ToolRegistry] = None,
 ) -> Dict[str, autogen.AssistantAgent]:
     key_map = {
@@ -62,14 +67,12 @@ def create_workflow_agents(
         if not key:
             continue
 
-        profile = AgentProfile(name=spec.name, prompt=spec.prompt, rag_query=spec.rag_query)
+        profile = AgentProfile(name=spec.name, prompt=spec.prompt, tool_names=spec.tool_names)
         agents[key] = create_assistant_agent(
             profile=profile,
             llm_config=llm_config,
             mem_ctx=mem_ctx,
-            rag_context=rag_context,
             tool_registry=tool_registry,
-            tool_names=spec.tool_names,
         )
 
     missing = [v for v in key_map.values() if v not in agents]

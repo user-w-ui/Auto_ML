@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from src.rag.run_memory import RunMemory
 
@@ -87,3 +88,37 @@ def organize_generated_files(run_dir: Path, plot_dir: Path, data_dir: Path) -> N
                 idx += 1
 
         p.replace(dest)
+
+
+def load_explorer_profile(profile_path: Path) -> Optional[Dict[str, Any]]:
+    """Load and validate explorer_dataset_profile.json contract."""
+    if not profile_path.exists():
+        return None
+    try:
+        obj = json.loads(profile_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+    if not isinstance(obj, dict):
+        return None
+
+    required_keys = {
+        "task_type",
+        "target_type",
+        "sample_size_bucket",
+        "feature_type_profile",
+        "signal_hypothesis",
+        "compute_budget",
+    }
+    if any(k not in obj for k in required_keys):
+        return None
+
+    task_type_value = str(obj.get("task_type", "")).strip().lower()
+    if task_type_value not in {"supervised", "unsupervised"}:
+        return None
+
+    # Keep profile source-pure; retrieval query is derived later by trainer.
+    if "recommended_labels" in obj:
+        return None
+
+    return obj
