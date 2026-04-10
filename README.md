@@ -6,21 +6,13 @@ An AG2-based multi-agent pipeline that automates tabular ML end-to-end: explorat
 
 The workflow uses a state-machine style orchestration with an explicit controller agent:
 
-1. `Explore`: profile data and generate exploratory code.
-2. `Preprocess`: clean and transform features.
-3. `Train`: train and compare models in multiple trials.
-4. `Evaluate`: check quality gates and decide next transition.
-5. `Summarize`: produce final summary and artifacts.
-
-Agent roles:
-
 - `Data_Explorer`: data inspection and exploratory code.
 - `Data_Processer`: preprocessing and feature preparation.
 - `Model_Trainer`: iterative model training.
 - `Evaluator`: state control and workflow analysis (quality gate, pass/fail, replan guidance).
 - `Code_Summarizer`: final integration and summary output.
 
-Current workflow states are not limited to four stages. The complete state set is:
+Current workflow states set :
 
 - `EXPLORE`
 - `PREPROCESS`
