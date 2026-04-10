@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -16,6 +15,13 @@ from src.agent.definition import create_initializer, create_workflow_agents
 from src.rag.injector import build_rag_injector
 from src.rag.run_memory import RunMemory
 from src.workflow.code_helpers import extract_python_code_blocks, sanitize_python_code, state_script_name
+from src.workflow.runtime_helpers import (
+    build_llm_config_from_env,
+    ensure_windows_scripts_on_path,
+    memory_context,
+    organize_generated_files,
+    progress,
+)
 from src.workflow.prompts import CODE_EXECUTOR_SYSTEM_MESSAGE, build_task_prompt
 
 
@@ -42,93 +48,13 @@ DEFAULT_STATE_ATTEMPT_LIMITS: Dict[str, int] = {
 }
 
 
-def _ensure_windows_scripts_on_path() -> None:
-    """在 Windows 环境下，将当前 Python 的 Scripts 目录加入 PATH。"""
-    if os.name == "nt":
-        scripts_dir = Path(sys.executable).parent / "Scripts"
-        if scripts_dir.exists():
-            current_path = os.environ.get("PATH", "")
-            os.environ["PATH"] = f"{scripts_dir}{os.pathsep}{current_path}"
-
-
-def build_llm_config_from_env() -> Dict[str, Any]:
-    """从环境变量构建 LLM 配置，缺少关键密钥时直接报错。"""
-    deepseek_api_key = os.environ.get("DEEPSEEK_API_KEY")
-    deepseek_base_url = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
-    deepseek_model = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
-    if not deepseek_api_key:
-        raise RuntimeError("Missing DEEPSEEK_API_KEY. Please set it in .env or environment variables.")
-    return {
-        "api_type": "openai",
-        "model": deepseek_model,
-        "api_key": deepseek_api_key,
-        "base_url": deepseek_base_url,
-    }
-
-
-def _memory_context(mem: RunMemory, n: int = 12) -> str:
-    """提取最近 n 条运行记忆并拼接为提示上下文。"""
-    tail = mem.tail(n=n).strip()
-    if not tail:
-        return ""
-    return (
-        "Recent Run Memory (JSONL, newest last):\n"
-        + tail
-        + "\n\n"
-        + "Use this memory to avoid repeating failed steps and to reuse what already worked.\n"
-    )
-
-
-def _progress(message: str) -> None:
-    """统一工作流日志输出格式，便于终端追踪。"""
-    print(f"[workflow] {message}", flush=True)
-
-
-def _organize_generated_files(run_dir: Path, plot_dir: Path, data_dir: Path) -> None:
-    """将运行目录下散落的输出文件按类型归档到 plot/data 子目录。"""
-    image_exts = {".png", ".jpg", ".jpeg", ".svg", ".webp", ".gif", ".pdf"}
-    data_exts = {".csv", ".parquet", ".json", ".xlsx", ".pkl", ".joblib"}
-    reserved_dirs = {"plot", "data", "coding", "logs"}
-    reserved_files = {"status.json", "run_config.json", "run_memory.jsonl"}
-
-    for p in run_dir.iterdir():
-        if p.is_dir() or p.name in reserved_files:
-            continue
-        if p.parent == run_dir and p.name in reserved_dirs:
-            continue
-
-        ext = p.suffix.lower()
-        dest = None
-        if ext in image_exts:
-            dest = plot_dir / p.name
-        elif ext in data_exts:
-            dest = data_dir / p.name
-
-        if dest is None:
-            continue
-
-        if dest.exists():
-            # 避免重名覆盖：自动追加递增后缀。
-            stem = p.stem
-            suffix = p.suffix
-            idx = 1
-            while True:
-                candidate = dest.with_name(f"{stem}_{idx}{suffix}")
-                if not candidate.exists():
-                    dest = candidate
-                    break
-                idx += 1
-
-        p.replace(dest)
-
-
 def run_workflow(config: Dict[str, Any], run_dir: Optional[Path] = None) -> Dict[str, Any]:
     """执行 AutoML 多 Agent 主流程：Explore -> Preprocess -> Train -> Summarize。"""
-    _ensure_windows_scripts_on_path()
+    ensure_windows_scripts_on_path()
     os.environ.setdefault("KG_WS_PING_INTERVAL_SECS", "0")
 
     run_dir = Path(run_dir or ".").resolve()
-    _progress(f"run started | run_dir={run_dir}")
+    progress(f"run started | run_dir={run_dir}")
     run_dir.mkdir(parents=True, exist_ok=True)
 
     # 准备本次运行所需目录结构。
@@ -162,8 +88,8 @@ def run_workflow(config: Dict[str, Any], run_dir: Optional[Path] = None) -> Dict
     client = OpenAIWrapper(config_list=[llm_config])
 
     # 组装 RAG 与历史记忆上下文，减少重复试错。
-    rag_context = build_rag_injector(config, run_dir, _progress)
-    mem_ctx = _memory_context(mem, n=12)
+    rag_context = build_rag_injector(config, run_dir, progress)
+    mem_ctx = memory_context(mem)
 
     # 创建初始化器与各阶段 Agent。
     initializer = create_initializer()
@@ -271,7 +197,7 @@ def run_workflow(config: Dict[str, Any], run_dir: Optional[Path] = None) -> Dict
                     ),
                 }
             )
-            _progress("state=REPLAN -> EXPLORE")
+            progress("state=REPLAN -> EXPLORE")
             return _schedule_state(WorkflowState.EXPLORE, groupchat, via=WorkflowState.REPLAN.value)
 
         if within_limit:
@@ -287,7 +213,7 @@ def run_workflow(config: Dict[str, Any], run_dir: Optional[Path] = None) -> Dict
         )
 
         if state == WorkflowState.EVALUATE:
-            _progress("state=EVALUATE exceeded max loops -> HUMAN_REVIEW")
+            progress("state=EVALUATE exceeded max loops -> HUMAN_REVIEW")
             _record_state_enter(WorkflowState.HUMAN_REVIEW, reason="evaluate_max_loops_exceeded")
             return summarizer
 
@@ -302,7 +228,7 @@ def run_workflow(config: Dict[str, Any], run_dir: Optional[Path] = None) -> Dict
             }
         )
         evaluate_target = state
-        _progress(f"state={state.value} exceeded max loops -> EVALUATE")
+        progress(f"state={state.value} exceeded max loops -> EVALUATE")
         ok = _record_state_enter(WorkflowState.EVALUATE, target=state.value, reason="max_loops_exceeded")
         if ok:
             return evaluator
@@ -318,7 +244,7 @@ def run_workflow(config: Dict[str, Any], run_dir: Optional[Path] = None) -> Dict
         messages = groupchat.messages
 
         if last_speaker is initializer:
-            _progress("state=EXPLORE")
+            progress("state=EXPLORE")
             return _schedule_state(WorkflowState.EXPLORE, groupchat)
 
         if last_speaker in [data_explorer, data_processer, model_trainer]:
@@ -377,31 +303,31 @@ def run_workflow(config: Dict[str, Any], run_dir: Optional[Path] = None) -> Dict
                 )
 
                 if last_worker == "Data_Explorer":
-                    _progress("state=EXPLORE failed -> retry")
+                    progress("state=EXPLORE failed -> retry")
                     return _schedule_state(WorkflowState.EXPLORE, groupchat, via="retry")
                 if last_worker == "Data_Processer":
-                    _progress("state=PREPROCESS failed -> retry")
+                    progress("state=PREPROCESS failed -> retry")
                     return _schedule_state(WorkflowState.PREPROCESS, groupchat, via="retry")
                 if last_worker == "Model_Trainer":
-                    _progress("state=TRAIN failed -> retry")
+                    progress("state=TRAIN failed -> retry")
                     return _schedule_state(WorkflowState.TRAIN, groupchat, via="retry")
                 return _schedule_state(WorkflowState.EXPLORE, groupchat)
 
             if last_worker == "Data_Explorer":
                 mem.append({"type": "state_exit", "state": WorkflowState.EXPLORE.value, "ok": True})
-                _progress("state=EXPLORE done -> PREPROCESS")
+                progress("state=EXPLORE done -> PREPROCESS")
                 return _schedule_state(WorkflowState.PREPROCESS, groupchat)
 
             if last_worker == "Data_Processer":
                 mem.append({"type": "state_exit", "state": WorkflowState.PREPROCESS.value, "ok": True})
                 evaluate_target = WorkflowState.PREPROCESS
-                _progress("state=PREPROCESS done -> EVALUATE")
+                progress("state=PREPROCESS done -> EVALUATE")
                 return _schedule_state(WorkflowState.EVALUATE, groupchat, target=evaluate_target.value)
 
             if last_worker == "Model_Trainer":
                 mem.append({"type": "state_exit", "state": WorkflowState.TRAIN.value, "ok": True})
                 evaluate_target = WorkflowState.TRAIN
-                _progress("state=TRAIN done -> EVALUATE")
+                progress("state=TRAIN done -> EVALUATE")
                 return _schedule_state(WorkflowState.EVALUATE, groupchat, target=evaluate_target.value)
 
         if last_speaker is evaluator:
@@ -437,7 +363,7 @@ def run_workflow(config: Dict[str, Any], run_dir: Optional[Path] = None) -> Dict
                     }
                 )
                 if ready:
-                    _progress("state=EVALUATE(PREPROCESS) passed -> TRAIN")
+                    progress("state=EVALUATE(PREPROCESS) passed -> TRAIN")
                     return _schedule_state(WorkflowState.TRAIN, groupchat)
 
                 groupchat.messages.append(
@@ -451,7 +377,7 @@ def run_workflow(config: Dict[str, Any], run_dir: Optional[Path] = None) -> Dict
                         ),
                     }
                 )
-                _progress("state=EVALUATE(PREPROCESS) failed -> EXPLORE")
+                progress("state=EVALUATE(PREPROCESS) failed -> EXPLORE")
                 return _schedule_state(WorkflowState.EXPLORE, groupchat, via=WorkflowState.EVALUATE.value)
 
             if evaluate_target == WorkflowState.TRAIN:
@@ -466,10 +392,10 @@ def run_workflow(config: Dict[str, Any], run_dir: Optional[Path] = None) -> Dict
                     }
                 )
                 if trials_done >= train_trials:
-                    _progress("state=EVALUATE(TRAIN) passed -> DONE")
+                    progress("state=EVALUATE(TRAIN) passed -> DONE")
                     return _schedule_state(WorkflowState.DONE, groupchat)
 
-                _progress("state=EVALUATE(TRAIN) continue -> TRAIN")
+                progress("state=EVALUATE(TRAIN) continue -> TRAIN")
                 return _schedule_state(WorkflowState.TRAIN, groupchat, via=WorkflowState.EVALUATE.value)
 
         if last_speaker is summarizer:
@@ -481,12 +407,12 @@ def run_workflow(config: Dict[str, Any], run_dir: Optional[Path] = None) -> Dict
             if current_state == WorkflowState.HUMAN_REVIEW:
                 current_state = WorkflowState.FAILED
                 mem.append({"type": "state_enter", "state": WorkflowState.FAILED.value, "reason": "needs_human_review"})
-                _progress("state=FAILED | handoff for human review")
+                progress("state=FAILED | handoff for human review")
                 return None
 
             current_state = WorkflowState.DONE
             mem.append({"type": "state_exit", "state": WorkflowState.DONE.value, "ok": True})
-            _progress("state=DONE | workflow completed")
+            progress("state=DONE | workflow completed")
             return None
 
         return None
@@ -504,7 +430,7 @@ def run_workflow(config: Dict[str, Any], run_dir: Optional[Path] = None) -> Dict
         # 启动多 Agent 对话主循环。
         chat_result = initializer.initiate_chat(manager, message=task_prompt)
         # 对输出产物做归档整理。
-        _organize_generated_files(run_dir=run_dir, plot_dir=plot_dir, data_dir=data_dir)
+        organize_generated_files(run_dir=run_dir, plot_dir=plot_dir, data_dir=data_dir)
 
         saved_train_file = None
         if chat_result and chat_result.chat_history:
