@@ -1,25 +1,45 @@
 # Automated Machine Learning Workflow
 
-An AG2-based multi-agent pipeline that automates tabular ML end-to-end: exploration, preprocessing, training, and summarization.
+An AG2-based multi-agent pipeline that automates tabular ML end-to-end: exploration, preprocessing, training, evaluation, and summarization.
 
 ## What This Project Does
 
-The workflow uses a state-machine style orchestration:
+The workflow uses a state-machine style orchestration with an explicit controller agent:
 
 1. `Explore`: profile data and generate exploratory code.
 2. `Preprocess`: clean and transform features.
 3. `Train`: train and compare models in multiple trials.
-4. `Summarize`: produce final summary and artifacts.
+4. `Evaluate`: check quality gates and decide next transition.
+5. `Summarize`: produce final summary and artifacts.
+
+Agent roles:
+
+- `Data_Explorer`: data inspection and exploratory code.
+- `Data_Processer`: preprocessing and feature preparation.
+- `Model_Trainer`: iterative model training.
+- `Evaluator`: state control and workflow analysis (quality gate, pass/fail, replan guidance).
+- `Code_Summarizer`: final integration and summary output.
+
+Current workflow states are not limited to four stages. The complete state set is:
+
+- `EXPLORE`
+- `PREPROCESS`
+- `TRAIN`
+- `EVALUATE`
+- `REPLAN`
+- `HUMAN_REVIEW`
+- `DONE`
+- `FAILED`
 
 At each step, an LLM agent proposes code and a code executor runs it. Failed execution keeps the workflow in the same state for retry.
 
 ## Core Features
 
 - Multi-agent orchestration with AG2 `GroupChat` custom speaker transitions.
-- Stateful workflow transitions (`Explore -> Preprocess -> Train -> Summarize`).
-- Two execution backends:
-  - `local-jupyter`
-  - `docker-jupyter`
+- Stateful workflow transitions with quality-gated control (`Explore -> Preprocess -> Evaluate -> Train -> Evaluate -> Done/Retry/Replan`).
+- Dedicated `Evaluator` agent for transition control and process diagnostics.
+- Expanded state machine with retry/replan/human-review outcomes.
+- Code execution backends: `local-jupyter` and `docker-jupyter`.
 - RAG support from local knowledge base (`kb/`) using Ollama embeddings.
 - Job-style run management with `run_id`, status tracking, and structured artifacts.
 
@@ -78,61 +98,15 @@ Important fields:
 - `workflow.train_trials`: number of training trials
 - `workflow.max_rounds`: max group chat rounds
 
-## Run Methods
+## Quick Start
 
-### Recommended: CLI Job Mode
-
-Create one run with generated `run_id`:
-
-```bash
-python -m src.cli run --config configs/example.yaml
-```
-
-Foreground mode (stream workflow logs to terminal):
+Use this as the primary startup command:
 
 ```bash
 python -m src.cli run --foreground --config configs/example.yaml
 ```
 
-Custom run id:
-
-```bash
-python -m src.cli run --config configs/example.yaml --run-id my_run_001
-```
-
-List runs:
-
-```bash
-python -m src.cli list
-```
-
-Query a run status:
-
-```bash
-python -m src.cli status --run-id <run_id>
-```
-
-Status command auto-reconciles stale `running` runs by default (process dead or heartbeat timeout):
-
-```bash
-python -m src.cli status --run-id <run_id> --stale-after 900
-```
-
-Disable auto-reconcile if you only want raw file content:
-
-```bash
-python -m src.cli status --run-id <run_id> --no-refresh
-```
-
-### Legacy Direct Mode
-
-You can still run directly via:
-
-```bash
-python -m src.main
-```
-
-This writes to `runs/manual_run/` and is useful for quick local debugging, but `src.cli` is preferred for traceable, multi-run job management.
+This runs the full state-machine workflow and writes outputs to `runs/<run_id>/`.
 
 ## Status Monitoring and Observability
 
@@ -169,63 +143,48 @@ Standardized output structure per run:
 
 This avoids scattering generated files in the project root.
 
-## Docker
+## Project Structure Visualization
 
-### Docker Compose (Recommended)
+Project layout (with brief file responsibilities):
 
-Run the full project in one container with mounted workspace:
-
-```bash
-docker compose build
-docker compose run --rm automl
-```
-
-Current compose command executes:
-
-```bash
-python -m src.cli run --foreground --config configs/container.yaml
-```
-
-Why `configs/container.yaml` uses `local-jupyter`:
-
-- The app itself is already running inside a container.
-- `local-jupyter` keeps code execution in the same filesystem namespace (`/app`).
-- This avoids host/container path mismatch for dataset and outputs.
-
-### Docker Image Direct Run (No Compose)
-
-Build image:
-
-```bash
-docker build -t automl-kaggle .
-```
-
-Run image directly:
-
-```bash
-docker run --rm --env-file .env automl-kaggle
-```
-
-Optional with host mount for persistent outputs:
-
-```bash
-docker run --rm --env-file .env -v ${PWD}:/app automl-kaggle
-```
-
-### Use Docker as Code Executor Backend (from Host Python)
-
-If running `python -m src.cli` on host but want sandboxed execution:
-
-```powershell
-$env:CODE_EXECUTOR_BACKEND="docker-jupyter"
-python -m src.cli run --config configs/example.yaml --foreground
-```
-
-Optional custom executor image:
-
-```powershell
-$env:DOCKER_JUPYTER_IMAGE="your-custom-image"
-python -m src.cli run --config configs/example.yaml --foreground
+```text
+automate-ml-for-kaggle/
+├── src/
+│   ├── cli.py                         # CLI entry: run/list/status commands
+│   ├── main.py                        # Legacy direct entry for quick local run
+│   ├── utils.py                       # Shared utility functions (execution parsing, trial counting, quality checks)
+│   ├── agent/
+│   │   ├── definition.py              # Agent construction and system-message composition
+│   │   ├── prompts.py                 # Role prompts and RAG queries (includes Evaluator)
+│   │   └── tools.py                   # Optional tool registry and attachment
+│   ├── config/
+│   │   └── load.py                    # YAML config loader and validation
+│   ├── jobs/
+│   │   ├── artifacts.py               # Run directory layout and artifact paths
+│   │   ├── events.py                  # Structured event logger (JSONL)
+│   │   └── status.py                  # Run status model, heartbeat, persistence
+│   ├── rag/
+│   │   ├── embeddings_ollama.py       # Embedding client for Ollama
+│   │   ├── injector.py                # RAG context builder for prompts
+│   │   ├── kb_index.py                # Mini vector index build/search for kb/*.md
+│   │   └── run_memory.py              # Short-term run memory and deduped context summarization
+│   └── workflow/
+│       ├── app.py                     # Core workflow state machine and speaker transitions
+│       ├── runtime_helpers.py         # Runtime helper functions (env, logging, memory context, artifact organization)
+│       ├── code_helpers.py            # Code block extraction/sanitization and state file naming
+│       ├── prompts.py                 # Task prompt templates for workflow execution
+│       ├── runner.py                  # Worker process entry: run lifecycle + heartbeat + status updates
+│       └── subprocess.py              # Subprocess helpers for workflow orchestration
+├── configs/
+│   ├── example.yaml                   # Local default run configuration
+│   └── container.yaml                 # Container-oriented run configuration
+├── kb/
+│   └── *.md                           # Knowledge base docs used by RAG retrieval
+├── runs/
+│   └── <run_id>/                      # Per-run artifacts (coding, data, plot, logs, memory, status)
+├── Dockerfile                         # Container image definition
+├── docker-compose.yml                 # Compose service for one-command container run
+└── pyproject.toml                     # Python project metadata and dependencies
 ```
 
 ## AG2 References
