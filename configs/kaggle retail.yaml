@@ -1,0 +1,20 @@
+job:
+  name: "kaggle-retail-demo"
+
+data:
+  path: "${KAGGLE_DATA_PATH}"
+  target: "${KAGGLE_TARGET:-Quantity}"
+  task_type: "${KAGGLE_TASK_TYPE:-regression}"
+
+execution:
+  code_executor_backend: "local-jupyter"
+
+workflow:
+  max_rounds: 20
+  train_trials: 2
+
+rag:
+  kb_dir: "kb"
+  top_k: 4
+  ollama_base_url: "http://localhost:11434"
+  ollama_model: "nomic-embed-text"

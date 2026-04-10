@@ -1,6 +1,7 @@
 # Automated Machine Learning Workflow
 
 An AG2-based multi-agent pipeline that automates tabular ML end-to-end: exploration, preprocessing, training, evaluation, and summarization.
+Check the [demo notebooks](Auto_ML%20demo.ipynb).
 
 ## What This Project Does
 
@@ -174,6 +175,7 @@ automate-ml-for-kaggle/
 │   └── *.md                           # Knowledge base docs used by RAG retrieval
 ├── runs/
 │   └── <run_id>/                      # Per-run artifacts (coding, data, plot, logs, memory, status)
+├── Auto_ML demo.ipynb                 # End-to-end demo notebook (Kaggle download + live run memory + artifacts view)
 ├── Dockerfile                         # Container image definition
 ├── docker-compose.yml                 # Compose service for one-command container run
 └── pyproject.toml                     # Python project metadata and dependencies
